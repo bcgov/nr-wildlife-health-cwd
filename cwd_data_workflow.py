@@ -1,3 +1,18 @@
+#-------------------------------------------------------------------------------
+# Name:        Chronic Wasting Disease (CWD) Data Workflow
+#
+# Purpose:     This script automates the CWD data workflow by joining data from AGO
+#              and Object Storage and exports master datasets.
+#              
+# Input(s):    (1) Object Storage credentials.
+#              (2) ArcGIS Online credentials.          
+#
+# Author:      Moez Labiadh - GeoBC
+#
+# Created:     2024-07-03
+# Updated:     
+#-------------------------------------------------------------------------------
+
 import os
 import boto3
 import botocore

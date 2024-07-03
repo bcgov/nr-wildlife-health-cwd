@@ -4,5 +4,5 @@ requests
 pandas
 geopandas
 shapely
-configparser
+fiona
 openpyxl
