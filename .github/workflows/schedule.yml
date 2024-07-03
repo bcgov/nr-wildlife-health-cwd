@@ -1,0 +1,38 @@
+name: Run CWD Data Workflow Daily at 6am PDT (1pm UTC)
+
+on:
+  schedule:
+    # Runs at 6am PDT every day
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Allows manual triggering of the workflow
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    env:
+      S3_ENDPOINT: ${{ secrets.S3_ENDPOINT}}
+      S3_CWD_ACCESS_KEY: ${{ secrets.S3_CWD_ACCESS_KEY}}
+      S3_CWD_SECRET_KEY: ${{ secrets.S3_CWD_SECRET_KEY}}
+      AGO_TOKEN_URL: ${{ secrets.AGO_TOKEN_URL}}
+      AGO_HOST: ${{ secrets.AGO_HOST}}
+      AGO_ACCOUNT_ID: ${{ secrets.AGO_ACCOUNT_ID}}
+      AGO_USERNAME: ${{ secrets.AGO_USERNAME}}
+      AGO_PASSWORD: ${{ secrets.AGO_PASSWORD}}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run the script
+      run: python cwd_data_workflow.py
