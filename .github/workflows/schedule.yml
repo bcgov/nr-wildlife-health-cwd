@@ -1,13 +1,14 @@
-name: Run CWD Data Workflow Daily at 6am PDT (1pm UTC)
+name: Run CWD Data Workflow Daily at 6am PST (1pm UTC)
 
 on:
   schedule:
-    # Runs at 6am PDT every day
+    # Runs at 6am PST every day
     - cron: '0 13 * * *'
   workflow_dispatch: # Allows manual triggering of the workflow
 
 jobs:
   run-script:
+    if: github.repository == 'bcgov/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run
     runs-on: ubuntu-latest
 
     env:
