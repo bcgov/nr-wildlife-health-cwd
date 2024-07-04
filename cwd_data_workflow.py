@@ -9,7 +9,7 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-03
+# Created:     2024-07-04
 # Updated:     
 #-------------------------------------------------------------------------------
 
@@ -23,33 +23,6 @@ import geopandas as gpd
 from shapely import geometry
 from datetime import datetime
 import logging
-
-
-def configure_logging(log_file='app.log', log_level=logging.INFO):
-    """
-    Configures the logging settings
-    """
-    # Clear existing handlers from the root logger
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    
-    # Set up new logging configuration
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    
-    # File handler
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
-    
-    # Console handler with a simpler formatter
-    console_formatter = logging.Formatter('%(message)s')  # Only message without date, time, level
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
-    
-    # Set the logging level
-    root_logger.setLevel(log_level)
 
 
 def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
@@ -121,18 +94,31 @@ def get_ago_token(TOKEN_URL, HOST, USERNAME, PASSWORD):
         'referer': HOST,
         'f': 'json'
     }
-    #response = requests.post(TOKEN_URL, data=params, verify=False) #without SSL verification
-    response = requests.post(TOKEN_URL, data=params, verify=True)  #with SSL verification
-    response.raise_for_status()  
     
-    return response.json().get('token')
+    try:
+        # Send request to get token
+        response = requests.post(TOKEN_URL, data=params, verify=True) # Enable SSL verification
+
+        # Check response status
+        response.raise_for_status()
+
+        logging.info("..successfully obtained access token.")
+        
+        return response.json().get('token')
+    
+    except requests.exceptions.RequestException as e:
+        logging.error(f"..failed to obtain access token: {e}")
+        raise
 
 
 def query_ago_feature_layer(token, ACCOUNT_ID, FEATURE_SERVICE, LYR_INDEX=0):
     """
     Returns data from AGO layer based on query 
     """
-    query_url = f"https://services6.arcgis.com/{ACCOUNT_ID}/arcgis/rest/services/{FEATURE_SERVICE}/FeatureServer/{LYR_INDEX}/query"
+    query_url = (
+        f"https://services6.arcgis.com/{ACCOUNT_ID}/arcgis/rest/services/"
+        f"{FEATURE_SERVICE}/FeatureServer/{LYR_INDEX}/query"
+    )
     query_params = {
         'where': '1=1',  # Return all features
         'outFields': '*',  # Return all fields
@@ -142,11 +128,25 @@ def query_ago_feature_layer(token, ACCOUNT_ID, FEATURE_SERVICE, LYR_INDEX=0):
         'f': 'json',
         'token': token
     }
-    #response = requests.get(query_url, params=query_params, verify=False) #without SSL verification
-    response = requests.get(query_url, params=query_params, verify=True)   #with SSL verification
-    response.raise_for_status()  # Raise an exception for HTTP errors
     
-    return response.json()
+    try:
+        # Send request to query feature layer
+        response = requests.get(query_url, params=query_params, verify=True)  # Enable SSL verification
+
+        # Check response status
+        response.raise_for_status()
+
+        # Check if response JSON contains features
+        if 'features' in response.json():
+            logging.info("..successfully queried feature layer.")
+            return response.json()
+        else:
+            logging.warning("..response JSON does not contain 'features'.")
+            return None
+    
+    except requests.exceptions.RequestException as e:
+        logging.error(f"..ailed to query feature layer: {e}")
+        raise
 
 
 def features_to_gdf(features):
@@ -187,7 +187,38 @@ def features_to_gdf(features):
     
     gdf = gpd.GeoDataFrame(data, geometry='geometry', crs=4326)
     
+    # Add latitude and longitude columns
+    gdf['Longitude'] = gdf.geometry.x
+    gdf['Latitude'] = gdf.geometry.y
+
+    if not gdf.empty:
+        logging.info(f"..processed {len(gdf)} features.")
+    else:
+        logging.warning("..geoDataFrame is empty.")
+        
     return gdf
+    
+
+def join_tables(df_ago, df_os):
+    """
+    Joins data from AGO and Object Storage into a master df
+    """
+    # Filter out rows with NaN or None values in the join key columns
+    df_ago = df_ago[df_ago['CWD_Ear_Card'].notna()]
+    df_os = df_os[df_os['CWD_EAR_CARD_ID'].notna()]
+    
+    df = pd.merge(df_ago, 
+                  df_os, 
+                  how='left', 
+                  left_on='CWD_Ear_Card', 
+                  right_on='CWD_EAR_CARD_ID')
+    
+    if df.empty:
+        logging.warning("..merged DataFrame is empty.")
+    
+    logging.info(f"..merged DataFrame contains {len(df)} rows.")
+    
+    return df
     
 
 def gdf_to_gdb(gdf, gdb_path, layer_name):
@@ -197,8 +228,6 @@ def gdf_to_gdb(gdf, gdb_path, layer_name):
     import fiona
     fiona.drvsupport.supported_drivers['OpenFileGDB'] = 'raw'
     
-
-
     # Save the gdf to the geodatabase
     gdf.to_file(gdb_path, layer=layer_name, driver="OpenFileGDB")
 
@@ -222,7 +251,7 @@ def save_csv_to_os(s3_client, bucket_name, df, file_name):
         
 
 if __name__ == "__main__":
-    configure_logging(log_level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     
     logging.info('Connecting to Object Storage')
     S3_ENDPOINT = os.getenv('S3_ENDPOINT')
@@ -231,10 +260,10 @@ if __name__ == "__main__":
     s3_client = connect_to_os(S3_ENDPOINT, S3_CWD_ACCESS_KEY, S3_CWD_SECRET_KEY)
     
     if s3_client:
-        logging.info('Retrieving Private Data from Object Storage')
+        logging.info('\nRetrieving Private Data from Object Storage')
         df_prv = get_data_from_os(s3_client)
     
-    logging.info('Connecting to AGOL')
+    logging.info('\nConnecting to AGOL')
     AGO_TOKEN_URL = os.getenv('AGO_TOKEN_URL')
     AGO_HOST = os.getenv('AGO_HOST')
     AGO_USERNAME = os.getenv('AGO_USERNAME')
@@ -243,35 +272,25 @@ if __name__ == "__main__":
     
     token = get_ago_token(AGO_TOKEN_URL, AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
     
-    logging.info('Retrieving data from AGOL')
+    logging.info('\nRetrieving data from AGOL')
     FEATURE_SERVICE = "TEST_data_CWD_no_private_info"
     features = query_ago_feature_layer(token, AGO_ACCOUNT_ID, FEATURE_SERVICE)
     
-    logging.info('Converting data to geodataframe')
+    logging.info('\nConverting data to geodataframe')
     gdf = features_to_gdf(features)
-     
-    logging.info('Joining tables')    
-    df = pd.merge(gdf, 
-                  df_prv, 
-                  how='left', 
-                  left_on='CWD_Ear_Card', 
-                  right_on='CWD_EAR_CARD_ID') 
-    
+ 
+    logging.info('\nJoining tables')    
+    df= join_tables (gdf, df_prv)
     
     '''
-    logging.info('Saving spatial data to GDB')
+    logging.info('\nSaving spatial data to GDB')
     gdb_path= os.path.join(script_dir, 'test_data.gdb')
     today = datetime.today().strftime('%Y%m%d')
     layer_name= today +'_cwd_spatial_data'
-    gdf_to_gdb(gdf, gdb_path, layer_name)
+    gdf_to_gdb(df, gdb_path, layer_name)
     '''
     
-    logging.info('Saving data to CSV')
+    logging.info('\nSaving csv to Master Dataset')
+    df = df.drop(columns='geometry') #remove geometry column
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
-    df=df[['Region', 'Drop_off_Location', 'WLH_ID_x','CWD_EAR_CARD_ID']]
-    
-    #df.to_csv(os.path.join(script_dir, 'test_outs', dytm+'_samples.csv'), index= False)
-
-    print (df.shape[0])
-    
-    save_csv_to_os(s3_client, 'whcwdd', df, f'master_dataset/{dytm}_samples.csv')
+    save_csv_to_os(s3_client, 'whcwdd', df, f'master_dataset/{dytm}_cwd_samples.csv')
