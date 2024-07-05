@@ -1,7 +1,9 @@
+re
 boto3
 botocore
 requests
 pandas
+numpy
 geopandas
 shapely
 fiona
