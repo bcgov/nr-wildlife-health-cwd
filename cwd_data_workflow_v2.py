@@ -4,16 +4,19 @@
 # Purpose:     This script automates the CWD data workflow. It combines
 #              incoming data saved in Object Storage and exports a master dataset.
 #              
-# Input(s):    (1) Object Storage credentials.         
+# Input(s):    (1) S3 Object Storage credentials. 
+#              (2) AGO ArcGIS Online credentials.          
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-05
+# Created:     2024-07-08
 # Updated:     
 #-------------------------------------------------------------------------------
 
 import os
 import re
+import json
+import requests
 import boto3
 import botocore
 import pandas as pd
@@ -190,7 +193,6 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
         
 
-
 def df_to_gdf(df, lat_col, lon_col, crs=4326):
     """
     Converts a DataFrame with latitude and longitude columns to a GeoDataFrame
@@ -198,9 +200,188 @@ def df_to_gdf(df, lat_col, lon_col, crs=4326):
     geometry = [Point(xy) for xy in zip(df[lon_col], df[lat_col])]
     gdf = gpd.GeoDataFrame(df, geometry=geometry)
     gdf.set_crs(epsg=crs, inplace=True)  
+        
+    #convert datetime cols to str: needed to publish to AGO later on
+    for column in gdf.columns:
+        if pd.api.types.is_datetime64_any_dtype(gdf[column]):
+            gdf[column] = gdf[column].astype(str)
     
     return gdf
+
+
+def get_ago_token(TOKEN_URL, HOST, USERNAME, PASSWORD):
+    """
+    Returns an access token to AGOL account
+    """
+    params = {
+        'username': USERNAME,
+        'password': PASSWORD,
+        'referer': HOST,
+        'f': 'json'
+    }
+    
+    try:
+        # Send request to get token
+        response = requests.post(TOKEN_URL, data=params, verify=True) # Enable SSL verification
+
+        # Check response status
+        response.raise_for_status()
+
+        logging.info("..successfully obtained AGO access token.")
+        
+        return response.json().get('token')
+    
+    except requests.exceptions.RequestException as e:
+        logging.error(f"..failed to obtain access token: {e}")
+        raise
+        
+        
+def get_ago_folderID(token, username, folder_name):
+    """
+    Get or create a folder in ArcGIS Online.
+    """
+    folders_url = f"https://www.arcgis.com/sharing/rest/content/users/{username}"
+    params = {
+        'f': 'json',
+        'token': token,
+    }
+
+    try:
+        # Check if the folder exists
+        response = requests.post(folders_url, data=params, verify=True)
+        response.raise_for_status()
+        folders = response.json().get('folders', [])
+        
+        for folder in folders:
+            if folder['title'] == folder_name:
+                logging.info(f"...folder '{folder_name}' already exists.")
+                return folder['id']
+        
+        # Create the folder if it does not exist
+        create_folder_url = f"{folders_url}/createFolder"
+        create_params = {
+            'f': 'json',
+            'title': folder_name,
+            'token': token
+        }
+        
+        create_response = requests.post(create_folder_url, data=create_params, verify=True)
+        create_response.raise_for_status()
+        
+        logging.info(f"...folder '{folder_name}' created successfully.")
+        return create_response.json().get('folder').get('id')
+    
+    except requests.exceptions.RequestException as e:
+        logging.error(f"...failed to create or get folder: {e}")
+        raise
             
+
+def create_feature_service(token, username, service_name):
+    params = {
+        'f': 'json',
+        'token': token,
+        'createParameters': json.dumps({
+            'name': service_name,
+            'serviceDescription': '',
+            'hasStaticData': False,
+            'maxRecordCount': 1000,
+            'supportedQueryFormats': 'JSON',
+            'capabilities': 'Create,Delete,Query,Update,Editing',
+            'initialExtent': {
+                'xmin': -180,
+                'ymin': -90,
+                'xmax': 180,
+                'ymax': 90,
+                'spatialReference': {'wkid': 4326}
+            },
+            'allowGeometryUpdates': True,
+            'units': 'esriDecimalDegrees',
+            'xssPreventionInfo': {'xssPreventionEnabled': True, 'xssPreventionRule': 'InputOnly', 'xssInputRule': 'rejectInvalid'}
+        }),
+        'tags': 'feature service',
+        'title': service_name
+    }
+    CREATE_SERVICE_URL = f'https://www.arcgis.com/sharing/rest/content/users/{username}/createService'
+    response = requests.post(CREATE_SERVICE_URL, data=params)
+    response_json = response.json()
+    if 'serviceItemId' in response_json and 'encodedServiceURL' in response_json:
+        service_id = response_json['serviceItemId']
+        service_url = response_json['encodedServiceURL']
+        admin_url = service_url.replace('/rest/', '/rest/admin/')
+        logging.info(f"...feature service created successfully with ID: {service_id}")
+        return service_id, admin_url
+    else:
+        raise Exception(f"Error creating feature service: {response_json}")
+
+
+def add_layer_to_service(token, admin_url):
+    add_to_definition_url = f"{admin_url}/addToDefinition"
+    layer_definition = {
+        "layers": [
+            {
+                "name": "Points",
+                "type": "Feature Layer",
+                "geometryType": "esriGeometryPoint",
+                "fields": [
+                    {
+                        "name": "ObjectID",
+                        "type": "esriFieldTypeOID",
+                        "alias": "ObjectID",
+                        "sqlType": "sqlTypeOther",
+                        "nullable": False,
+                        "editable": False,
+                        "domain": None,
+                        "defaultValue": None
+                    }
+                ],
+                "extent": {
+                    "xmin": -180,
+                    "ymin": -90,
+                    "xmax": 180,
+                    "ymax": 90,
+                    "spatialReference": {"wkid": 4326}
+                }
+            }
+        ]
+    }
+    params = {
+        'f': 'json',
+        'token': token,
+        'addToDefinition': json.dumps(layer_definition)
+    }
+    response = requests.post(add_to_definition_url, data=params)
+
+    response_json = response.json()
+    if 'success' in response_json and response_json['success']:
+        logging.info("...layer added to the feature service successfully")
+        return True
+    else:
+        raise Exception(f"Error adding layer to feature service: {response_json}")
+        
+        
+def add_features(token, service_url, df, latcol, longcol):
+    add_features_url = f"{service_url}/0/addFeatures"
+    features = []
+    for index, row in df.iterrows():
+        features.append({
+            'geometry': {'x': row[latcol], 'y': row[longcol], 'spatialReference': {'wkid': 4326}},
+            'attributes': {}
+        })
+    params = {
+        'f': 'json',
+        'token': token,
+        'features': json.dumps(features)
+    }
+    response = requests.post(add_features_url, data=params)
+    response_json = response.json()
+    if 'addResults' in response_json:
+        logging.info("...features added successfully")
+        return response_json['addResults']
+    else:
+        raise Exception(f"Error adding features: {response_json}")    
+        
+        
+        
         
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -221,8 +402,6 @@ if __name__ == "__main__":
     logging.info('\nPopulating missing latlon values')
     df= populate_missing_latlong (df)
     
-    df_test= df.loc[df['CWD Ear Card']==19296]
-    
     '''
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
@@ -231,3 +410,26 @@ if __name__ == "__main__":
     '''
     logging.info('\nCreating a GeoDataframe')
     gdf= df_to_gdf(df, 'Latitude (DD)', 'Longitude (DD)', crs=4326)
+    
+    
+    logging.info('\nPublishing the Master Dataset to AGO')
+    logging.info('..connecting to AGO')
+    AGO_TOKEN_URL = os.getenv('AGO_TOKEN_URL')
+    AGO_HOST = os.getenv('AGO_HOST')
+    AGO_USERNAME = os.getenv('AGO_USERNAME')
+    AGO_PASSWORD = os.getenv('AGO_PASSWORD')
+    AGO_ACCOUNT_ID = os.getenv('AGO_ACCOUNT_ID')
+    
+    token = get_ago_token(AGO_TOKEN_URL, AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
+    
+    logging.info('..getting AGO folder ID')
+    folder_name= "Hackathon_2024_Survey123"
+    folderID= get_ago_folderID(token, AGO_USERNAME, folder_name)
+    
+
+    logging.info('..publishing a Feature Service')
+    service_name= "CWD_Master_dataset"
+    service_id, admin_url = create_feature_service(token, AGO_USERNAME, service_name)
+    layer_added = add_layer_to_service(token, admin_url)
+    service_url = admin_url.replace('/admin/', '/')
+    add_features_response = add_features(token, service_url, df, 'Latitude (DD)', 'Longitude (DD)')
