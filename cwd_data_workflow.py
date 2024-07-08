@@ -121,8 +121,11 @@ def populate_missing_latlong (df):
     df['LatLong Accuracy'] = None
     
     columns = list(df.columns)
-    latlong_source_index = columns.index('LatLong Source')
-    columns.insert(latlong_source_index + 1, 'LatLong Accuracy')
+    longitude_index = columns.index('Longitude (DD)')
+    columns.remove('LatLong Source')
+    columns.remove('LatLong Accuracy')
+    columns.insert(longitude_index + 1, 'LatLong Source')
+    columns.insert(longitude_index + 2, 'LatLong Accuracy')
     df = df[columns]
     
     #correct errrors in MU column
@@ -183,8 +186,7 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
         
-        
-        
+            
         
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
