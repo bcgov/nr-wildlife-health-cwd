@@ -19,6 +19,9 @@ import botocore
 import pandas as pd
 import numpy as np
 from io import BytesIO
+import geopandas as gpd
+from shapely.geometry import Point
+
 from datetime import datetime
 import logging
 
@@ -186,6 +189,17 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
         
+
+
+def df_to_gdf(df, lat_col, lon_col, crs=4326):
+    """
+    Converts a DataFrame with latitude and longitude columns to a GeoDataFrame
+    """
+    geometry = [Point(xy) for xy in zip(df[lon_col], df[lat_col])]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry)
+    gdf.set_crs(epsg=crs, inplace=True)  
+    
+    return gdf
             
         
 if __name__ == "__main__":
@@ -209,7 +223,11 @@ if __name__ == "__main__":
     
     df_test= df.loc[df['CWD Ear Card']==19296]
     
+    '''
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
     save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
+    '''
+    logging.info('\nCreating a GeoDataframe')
+    gdf= df_to_gdf(df, 'Latitude (DD)', 'Longitude (DD)', crs=4326)
