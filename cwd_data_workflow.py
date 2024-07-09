@@ -103,17 +103,21 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     return df_rg, df_mu
     
 
-def populate_missing_latlong (df):
+def process_master_dataset(df):
     """
     Populates missing Latitude and Longitude values
+    Fromat Datetime columns
     """
     logging.info("..formatting columns ")
     df['Latitude (DD)'] = pd.to_numeric(df['Latitude (DD)'], errors='coerce')
     df['Longitude (DD)'] = pd.to_numeric(df['Longitude (DD)'], errors='coerce')
     
     def set_source_value(row):
-        if not pd.isna(row['Longitude (DD)']) and not pd.isna(row['Latitude (DD)']):
-            return 'Entered by User'
+        if pd.notna(row['Longitude (DD)']) and pd.notna(row['Latitude (DD)']):
+            if 47.0 <= row['Latitude (DD)'] <= 60.0 and -145.0 <= row['Longitude (DD)'] <= -113.0:
+                return 'Entered by User'
+            else:
+                return 'Incorrectly entered by user'
         return np.nan
 
     df['LatLong Source'] = df.apply(set_source_value, axis=1)
@@ -144,7 +148,7 @@ def populate_missing_latlong (df):
     logging.info("..retrieving latlon from MU centroids")
     #populate lat/long from MU centroid
     def latlong_from_MU(row, df_mu):
-        if pd.isnull(row['LatLong Source']) and row['MU'] != 'Not Recorded':
+        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['MU'] != 'Not Recorded':
             mu_value = row['MU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
@@ -158,7 +162,7 @@ def populate_missing_latlong (df):
     logging.info("..retrieving latlon from Region centroids")
     #populate lat/long from Region centroid
     def latlong_from_Region(row, df_rg):
-        if pd.isnull(row['LatLong Source']) and row['Region'] != 'Not Recorded':
+        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['Region'] != 'Not Recorded':
             rg_value = row['Region']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
@@ -168,6 +172,20 @@ def populate_missing_latlong (df):
         return row
     
     df = df.apply(lambda row: latlong_from_Region(row, df_rg), axis=1)
+    
+    df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
+    df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+    
+    # format datetime columns. STILL WORKING ON THIS. 
+    '''
+    for col in df.columns:
+        if 'date' in col.lower():
+            try:
+                df[col] = pd.to_datetime(df[col]).dt.strftime('%d %B %Y')
+            except ValueError:
+                pass  # Skip columns that can't be converted to datetime
+
+    '''
     
     return df
       
@@ -205,7 +223,7 @@ if __name__ == "__main__":
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
         
     logging.info('\nPopulating missing latlon values')
-    df= populate_missing_latlong (df)
+    df= process_master_dataset (df)
     
     df_test= df.loc[df['CWD Ear Card']==19296]
     
