@@ -238,7 +238,13 @@ def prepare_df_for_ago(df):
     """
     Cleans up df column names and coordinates for AGO.
     """
-    df_ago= df.copy()
+    df_ago = df.copy()
+    
+    # exclude these private columns from df_ago
+    private_cols = ['Submitter First Name', 'Submitter Last Name', 'Phone', 'FWID #']
+    
+    # Remove private columns from df_ago
+    df_ago = df_ago.drop(columns=private_cols, errors='ignore')
     
     def clean_name(name):
         # Remove specified special characters
@@ -546,5 +552,14 @@ if __name__ == "__main__":
     logging.info('\nCreating a GeoDataframe')
     gdf= df_to_gdf(df_ago, 'LatitudeDD', 'LongitudeDD', crs=4326)  
     
+    
+    
+    #This is not working for now...
+    '''
     logging.info('\nExporting to shapefile')
     export_gdf_to_shapefile (gdf, s3_client, 'CWD_Master_dataset', bucket_name='whcwdd', subfolder='spatial')
+    '''
+    
+    
+    
+
