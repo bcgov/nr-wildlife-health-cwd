@@ -178,6 +178,9 @@ def populate_missing_latlong(df):
     
     df = df.apply(lambda row: latlong_from_Region(row, df_rg), axis=1)
     
+    df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
+    df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+    
     return df
       
 
