@@ -9,7 +9,7 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-08
+# Created:     2024-07-09
 # Updated:     
 #-------------------------------------------------------------------------------
 
@@ -211,6 +211,28 @@ def df_to_gdf(df, lat_col, lon_col, crs=4326):
     
     return gdf
 
+def export_gdf_to_shapefile (gdf, s3_client, shapefile_name, bucket_name='whcwdd', subfolder='spatial'):
+    """
+    Exports a GeoDataFrame to a shapefile and uploads it to object storage.
+    """
+    try:
+        # Write GeoDataFrame to a temporary file-like object
+        with gpd.io.file.fiona_env():
+            with BytesIO() as fileobj:
+                gdf.to_file(fileobj, driver='ESRI Shapefile')
+                fileobj.seek(0)
+                
+                # Upload shapefile to object storage
+                s3_key = f'{subfolder}/{shapefile_name}.zip'
+                s3_client.upload_fileobj(fileobj, bucket_name, s3_key)
+        
+        logging.info(f'..shapefile uploaded successfully to {bucket_name}/{subfolder}')
+        return True
+    
+    except Exception as e:
+        logging.error(f'...failed to export or upload shapefile: {e}')
+        return False
+
 
 def prepare_df_for_ago(df):
     """
@@ -300,7 +322,7 @@ def get_ago_folderID(token, username, folder_name):
         raise
             
 
-def create_feature_service(token, username, service_name):
+def create_feature_service(token, username, folder_id, service_name):
     """
     Creates a Feature Service in ArcGIS online
     """
@@ -328,7 +350,7 @@ def create_feature_service(token, username, service_name):
         'tags': 'feature service',
         'title': service_name
     }
-    CREATE_SERVICE_URL = f'https://www.arcgis.com/sharing/rest/content/users/{username}/createService'
+    CREATE_SERVICE_URL = f'https://www.arcgis.com/sharing/rest/content/users/{username}/{folder_id}/createService'
     response = requests.post(CREATE_SERVICE_URL, data=params)
     response_json = response.json()
     if 'serviceItemId' in response_json and 'encodedServiceURL' in response_json:
@@ -512,7 +534,7 @@ if __name__ == "__main__":
 
     logging.info('..creating a Feature Service')
     service_name= "CWD_Master_dataset"
-    service_id, admin_url = create_feature_service(token, AGO_USERNAME, service_name)
+    service_id, admin_url = create_feature_service(token, AGO_USERNAME, folderID, service_name)
     
     logging.info('..adding a layer to the Feature Service')
     layer_added = add_layer_to_service(token, admin_url, df_ago, 'LatitudeDD', 'LongitudeDD')
@@ -523,3 +545,6 @@ if __name__ == "__main__":
     
     logging.info('\nCreating a GeoDataframe')
     gdf= df_to_gdf(df_ago, 'LatitudeDD', 'LongitudeDD', crs=4326)  
+    
+    logging.info('\nExporting to shapefile')
+    export_gdf_to_shapefile (gdf, s3_client, 'CWD_Master_dataset', bucket_name='whcwdd', subfolder='spatial')
