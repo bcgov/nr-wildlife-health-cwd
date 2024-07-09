@@ -109,7 +109,7 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     return df_rg, df_mu
     
 
-def populate_missing_latlong (df):
+def populate_missing_latlong(df):
     """
     Populates missing Latitude and Longitude values
     """
@@ -118,8 +118,11 @@ def populate_missing_latlong (df):
     df['Longitude (DD)'] = pd.to_numeric(df['Longitude (DD)'], errors='coerce')
     
     def set_source_value(row):
-        if not pd.isna(row['Longitude (DD)']) and not pd.isna(row['Latitude (DD)']):
-            return 'Entered by User'
+        if pd.notna(row['Longitude (DD)']) and pd.notna(row['Latitude (DD)']):
+            if 47.0 <= row['Latitude (DD)'] <= 60.0 and -145.0 <= row['Longitude (DD)'] <= -113.0:
+                return 'Entered by User'
+            else:
+                return 'Incorrectly entered by user'
         return np.nan
 
     df['LatLong Source'] = df.apply(set_source_value, axis=1)
@@ -150,7 +153,7 @@ def populate_missing_latlong (df):
     logging.info("..retrieving latlon from MU centroids")
     #populate lat/long from MU centroid
     def latlong_from_MU(row, df_mu):
-        if pd.isnull(row['LatLong Source']) and row['MU'] != 'Not Recorded':
+        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['MU'] != 'Not Recorded':
             mu_value = row['MU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
@@ -164,7 +167,7 @@ def populate_missing_latlong (df):
     logging.info("..retrieving latlon from Region centroids")
     #populate lat/long from Region centroid
     def latlong_from_Region(row, df_rg):
-        if pd.isnull(row['LatLong Source']) and row['Region'] != 'Not Recorded':
+        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['Region'] != 'Not Recorded':
             rg_value = row['Region']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
@@ -209,6 +212,27 @@ def df_to_gdf(df, lat_col, lon_col, crs=4326):
     return gdf
 
 
+def prepare_df_for_ago(df):
+    """
+    Cleans up df column names and coordinates for AGO.
+    """
+    df_ago= df.copy()
+    
+    def clean_name(name):
+        # Remove specified special characters
+        for char in ['(', ')', '#', '-', ' ', "'"]:
+            name = name.replace(char, '')
+        return name
+    
+    # Apply the cleaning function to all column names
+    df_ago.columns = [clean_name(col) for col in df_ago.columns]
+    
+    # Drop rows with NaN values in LatLongSource column
+    df_ago = df_ago.dropna(subset=['LatLongSource'])
+    
+    return df_ago
+
+
 def get_ago_token(TOKEN_URL, HOST, USERNAME, PASSWORD):
     """
     Returns an access token to AGOL account
@@ -227,12 +251,12 @@ def get_ago_token(TOKEN_URL, HOST, USERNAME, PASSWORD):
         # Check response status
         response.raise_for_status()
 
-        logging.info("..successfully obtained AGO access token.")
+        logging.info("...successfully obtained AGO access token.")
         
         return response.json().get('token')
     
     except requests.exceptions.RequestException as e:
-        logging.error(f"..failed to obtain access token: {e}")
+        logging.error(f"...failed to obtain access token: {e}")
         raise
         
         
@@ -277,6 +301,9 @@ def get_ago_folderID(token, username, folder_name):
             
 
 def create_feature_service(token, username, service_name):
+    """
+    Creates a Feature Service in ArcGIS online
+    """
     params = {
         'f': 'json',
         'token': token,
@@ -314,36 +341,59 @@ def create_feature_service(token, username, service_name):
         raise Exception(f"Error creating feature service: {response_json}")
 
 
-def add_layer_to_service(token, admin_url):
+def add_layer_to_service(token, admin_url, df, latcol, longcol):
+    """
+    Adds a Point Layer to the Feature Service
+    """
     add_to_definition_url = f"{admin_url}/addToDefinition"
+
+    fields = [{
+        "name": "ObjectID",
+        "type": "esriFieldTypeOID",
+        "alias": "ObjectID",
+        "sqlType": "sqlTypeOther",
+        "nullable": False,
+        "editable": False,
+        "domain": None,
+        "defaultValue": None
+    }]
+    
+    for col in df.columns:
+        fields.append({
+            "name": col,
+            "type": "esriFieldTypeString",  # Assuming all fields are string
+            "alias": col,
+            "sqlType": "sqlTypeOther",
+            "nullable": True,
+            "editable": True,
+            "domain": None,
+            "defaultValue": None
+        })
+
+    # Calculate extent from the lat/long columns
+    xmin = df[longcol].min()
+    ymin = df[latcol].min()
+    xmax = df[longcol].max()
+    ymax = df[latcol].max()
+
     layer_definition = {
         "layers": [
             {
                 "name": "Points",
                 "type": "Feature Layer",
                 "geometryType": "esriGeometryPoint",
-                "fields": [
-                    {
-                        "name": "ObjectID",
-                        "type": "esriFieldTypeOID",
-                        "alias": "ObjectID",
-                        "sqlType": "sqlTypeOther",
-                        "nullable": False,
-                        "editable": False,
-                        "domain": None,
-                        "defaultValue": None
-                    }
-                ],
+                "fields": fields,
                 "extent": {
-                    "xmin": -180,
-                    "ymin": -90,
-                    "xmax": 180,
-                    "ymax": 90,
+                    "xmin": xmin,
+                    "ymin": ymin,
+                    "xmax": xmax,
+                    "ymax": ymax,
                     "spatialReference": {"wkid": 4326}
                 }
             }
         ]
     }
+
     params = {
         'f': 'json',
         'token': token,
@@ -360,25 +410,59 @@ def add_layer_to_service(token, admin_url):
         
         
 def add_features(token, service_url, df, latcol, longcol):
+    """
+    Adds data (features) to the Feature Service Layer
+    """
     add_features_url = f"{service_url}/0/addFeatures"
     features = []
     for index, row in df.iterrows():
-        features.append({
-            'geometry': {'x': row[latcol], 'y': row[longcol], 'spatialReference': {'wkid': 4326}},
-            'attributes': {}
-        })
+        try:
+            attributes = {}
+            for col in df.columns:
+                value = row[col]
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                elif pd.isna(value):
+                    value = None
+                attributes[col] = value
+
+            feature = {
+                'geometry': {
+                    'x': float(row[longcol]),
+                    'y': float(row[latcol]),
+                    'spatialReference': {'wkid': 4326}
+                },
+                'attributes': attributes
+            }
+            features.append(feature)
+        except Exception as e:
+            logging.error(f"Error processing row {index}: {e}")
+
+    if not features:
+        logging.error("No valid features to add")
+        return []
+
     params = {
         'f': 'json',
         'token': token,
         'features': json.dumps(features)
     }
-    response = requests.post(add_features_url, data=params)
-    response_json = response.json()
-    if 'addResults' in response_json:
-        logging.info("...features added successfully")
-        return response_json['addResults']
-    else:
-        raise Exception(f"Error adding features: {response_json}")    
+    
+    try:
+        response = requests.post(add_features_url, data=params)
+        response.raise_for_status()
+        response_json = response.json()
+        
+        if 'addResults' in response_json:
+            successful_adds = sum(1 for result in response_json['addResults'] if result.get('success', False))
+            logging.info(f"...{successful_adds} out of {len(features)} features added successfully")
+            return response_json['addResults']
+        else:
+            logging.error(f"Error adding features: {response_json}")
+            return []
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request failed: {e}")
+        return []
         
         
         
@@ -402,16 +486,15 @@ if __name__ == "__main__":
     logging.info('\nPopulating missing latlon values')
     df= populate_missing_latlong (df)
     
-    '''
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
     save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
-    '''
-    logging.info('\nCreating a GeoDataframe')
-    gdf= df_to_gdf(df, 'Latitude (DD)', 'Longitude (DD)', crs=4326)
+
+    logging.info('\nPrepare the Dataframe for AGO publishing')
+    df_ago= prepare_df_for_ago(df)
     
-    
+
     logging.info('\nPublishing the Master Dataset to AGO')
     logging.info('..connecting to AGO')
     AGO_TOKEN_URL = os.getenv('AGO_TOKEN_URL')
@@ -427,9 +510,16 @@ if __name__ == "__main__":
     folderID= get_ago_folderID(token, AGO_USERNAME, folder_name)
     
 
-    logging.info('..publishing a Feature Service')
+    logging.info('..creating a Feature Service')
     service_name= "CWD_Master_dataset"
     service_id, admin_url = create_feature_service(token, AGO_USERNAME, service_name)
-    layer_added = add_layer_to_service(token, admin_url)
+    
+    logging.info('..adding a layer to the Feature Service')
+    layer_added = add_layer_to_service(token, admin_url, df_ago, 'LatitudeDD', 'LongitudeDD')
+    
+    logging.info('..loading data to the Feature Service Layer')
     service_url = admin_url.replace('/admin/', '/')
-    add_features_response = add_features(token, service_url, df, 'Latitude (DD)', 'Longitude (DD)')
+    add_features_response = add_features(token, service_url, df_ago, 'LatitudeDD', 'LongitudeDD')
+    
+    logging.info('\nCreating a GeoDataframe')
+    gdf= df_to_gdf(df_ago, 'LatitudeDD', 'LongitudeDD', crs=4326)  
