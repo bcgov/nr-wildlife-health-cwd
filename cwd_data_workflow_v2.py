@@ -109,9 +109,10 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     return df_rg, df_mu
     
 
-def populate_missing_latlong(df):
+def process_master_dataset(df):
     """
     Populates missing Latitude and Longitude values
+    Fromat Datetime columns
     """
     logging.info("..formatting columns ")
     df['Latitude (DD)'] = pd.to_numeric(df['Latitude (DD)'], errors='coerce')
@@ -180,6 +181,17 @@ def populate_missing_latlong(df):
     
     df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
     df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+    
+    # format datetime columns. STILL WORKING ON THIS. 
+    '''
+    for col in df.columns:
+        if 'date' in col.lower():
+            try:
+                df[col] = pd.to_datetime(df[col]).dt.strftime('%d %B %Y')
+            except ValueError:
+                pass  # Skip columns that can't be converted to datetime
+
+    '''
     
     return df
       
@@ -515,7 +527,7 @@ if __name__ == "__main__":
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
         
     logging.info('\nPopulating missing latlon values')
-    df= populate_missing_latlong (df)
+    df= process_master_dataset (df)
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
