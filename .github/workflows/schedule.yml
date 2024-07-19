@@ -3,7 +3,9 @@ name: Run CWD Data Workflow Daily at 6am PST (1pm UTC)
 on:
   schedule:
     # Runs at 6am PST every day
-    - cron: '0 13 * * *'
+    #- cron: '0 13 * * *'
+    # Runs at 6am PST every day, Monday- Friday - for testing
+    - cron: '0 13 * * MON-FRI'
   workflow_dispatch: # Allows manual triggering of the workflow
 
 jobs:
