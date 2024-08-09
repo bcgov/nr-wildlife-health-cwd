@@ -131,11 +131,11 @@ def process_master_dataset(df):
     df['LatLong Accuracy'] = None
     
     columns = list(df.columns)
-    longitude_index = columns.index('* Longitude (DD)')
+    spcol_index = columns.index('Spatial Capture Accuracy')
     columns.remove('LatLong Source')
     columns.remove('LatLong Accuracy')
-    columns.insert(longitude_index + 1, 'LatLong Source')
-    columns.insert(longitude_index + 2, 'LatLong Accuracy')
+    columns.insert(spcol_index + 1, 'LatLong Source')
+    columns.insert(spcol_index + 2, 'LatLong Accuracy')
     df = df[columns]
     
     #correct errrors in MU column
@@ -181,6 +181,15 @@ def process_master_dataset(df):
     
     df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
     df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+    
+    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp
+    current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    df['GIS_LOAD_VERSION_DATE'] = current_datetime
+
+    cols = list(df.columns)
+    spacc_index = cols.index('LatLong Accuracy')
+    cols.insert(spacc_index + 1, cols.pop(cols.index('GIS_LOAD_VERSION_DATE')))
+    df = df[cols]
     
     # format datetime columns. STILL WORKING ON THIS. 
     '''
