@@ -68,7 +68,7 @@ def get_incoming_data_from_os(s3_client):
                         logging.info(f"...reading file: {key}")
                         obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
                         df = pd.read_excel(BytesIO(obj_data['Body'].read()), 
-                                           sheet_name='Sampling')
+                                           sheet_name='Sampling Sheet')
                         df_list.append(df)
                     except botocore.exceptions.BotoCoreError as e:
                         logging.error(f"...failed to retrieve file: {e}")
