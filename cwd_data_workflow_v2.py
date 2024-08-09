@@ -8,9 +8,12 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-05
+# Created:     2024-08-09
 # Updated:     
 #-------------------------------------------------------------------------------
+
+import warnings
+warnings.simplefilter(action='ignore')
 
 import os
 import re
@@ -67,8 +70,11 @@ def get_incoming_data_from_os(s3_client):
                     try:
                         logging.info(f"...reading file: {key}")
                         obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
-                        df = pd.read_excel(BytesIO(obj_data['Body'].read()), 
+                        df = pd.read_excel(BytesIO(obj_data['Body'].read()),
+                                           header=1,
                                            sheet_name='Sampling Sheet')
+                        df = df[df['* CWD Ear Card'].notna()] #remove empty rows
+                        
                         df_list.append(df)
                     except botocore.exceptions.BotoCoreError as e:
                         logging.error(f"...failed to retrieve file: {e}")
@@ -109,12 +115,12 @@ def process_master_dataset(df):
     Fromat Datetime columns
     """
     logging.info("..formatting columns ")
-    df['Latitude (DD)'] = pd.to_numeric(df['Latitude (DD)'], errors='coerce')
-    df['Longitude (DD)'] = pd.to_numeric(df['Longitude (DD)'], errors='coerce')
+    df['* Latitude (DD)'] = pd.to_numeric(df['* Latitude (DD)'], errors='coerce')
+    df['* Longitude (DD)'] = pd.to_numeric(df['* Longitude (DD)'], errors='coerce')
     
     def set_source_value(row):
-        if pd.notna(row['Longitude (DD)']) and pd.notna(row['Latitude (DD)']):
-            if 47.0 <= row['Latitude (DD)'] <= 60.0 and -145.0 <= row['Longitude (DD)'] <= -113.0:
+        if pd.notna(row['* Longitude (DD)']) and pd.notna(row['* Latitude (DD)']):
+            if 47.0 <= row['* Latitude (DD)'] <= 60.0 and -145.0 <= row['* Longitude (DD)'] <= -113.0:
                 return 'Entered by User'
             else:
                 return 'Incorrectly entered by user'
@@ -125,7 +131,7 @@ def process_master_dataset(df):
     df['LatLong Accuracy'] = None
     
     columns = list(df.columns)
-    longitude_index = columns.index('Longitude (DD)')
+    longitude_index = columns.index('* Longitude (DD)')
     columns.remove('LatLong Source')
     columns.remove('LatLong Accuracy')
     columns.insert(longitude_index + 1, 'LatLong Source')
@@ -143,7 +149,7 @@ def process_master_dataset(df):
             parts[1] = parts[1][1:]
         return '-'.join(parts)
     
-    df['MU'] = df['MU'].apply(correct_mu_value)
+    df['* MU'] = df['* MU'].apply(correct_mu_value)
     
     logging.info("..retrieving latlon from MU centroids")
     #populate lat/long from MU centroid
@@ -152,8 +158,8 @@ def process_master_dataset(df):
             mu_value = row['MU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
+                row['* Latitude (DD)'] = match['CENTER_LAT'].values[0]
+                row['* Longitude (DD)'] = match['CENTER_LONG'].values[0]
                 row['LatLong Source'] = 'From MU'
         return row
     
@@ -166,8 +172,8 @@ def process_master_dataset(df):
             rg_value = row['Region']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
+                row['* Latitude (DD)'] = match['CENTER_LAT'].values[0]
+                row['* Longitude (DD)'] = match['CENTER_LONG'].values[0]
                 row['LatLong Source'] = 'From Region'
         return row
     
@@ -222,11 +228,11 @@ if __name__ == "__main__":
         logging.info('\nRetrieving Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
     
-        '''
+        
     logging.info('\nProcessing the master dataset')
     df= process_master_dataset (df)
     
-    df_test= df.loc[df['CWD Ear Card']==19296]
+    '''
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
