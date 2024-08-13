@@ -128,7 +128,7 @@ def process_master_dataset(df):
     def set_source_value(row):
         if pd.notna(row['LATITUDE_DD']) and pd.notna(row['LONGITUDE_DD']):
             if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
-                return 'Entered by User'
+                return 'From Earcard'
             else:
                 return 'Incorrectly entered by user'
         return np.nan
@@ -271,16 +271,34 @@ def construct_domains_dict(s3_client, bucket_name='whcwdd'):
     return domains_dict
 
 
-def publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD'):
+def publish_feature_layer(df, title='TEST_FL', folder='2024_CWD'):
     """
-    Publishes the master dataset to AGO and applies domains (value lists)
+    Publishes the master dataset to AGO.
     """
-    # Create a Spatial DataFrame
+    # Cleanup the master dataset before publishing
+    ############# Remove rows with empty coordinates...Discuss this with team ##################
+    df = df.dropna(subset=['LATITUDE_DD', 'LONGITUDE_DD'])
+
+    # Drop Personal info fields from the dataset
+    drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID']
+    df = df.drop(columns=drop_cols)
+
+    # Convert DATE fields to datetime and coerce errors to NaT
+    for col in df.columns:
+            if 'DATE' in col:
+                df[col] = pd.to_datetime(df[col], errors='coerce')  
+
+    #Create a spatial df
     sdf = pd.DataFrame.spatial.from_xy(df, x_column='LATITUDE_DD', y_column='LONGITUDE_DD')
 
     # Publish a feature layer
     sdf.spatial.to_featurelayer(title=title, gis=gis, folder=folder)
 
+    return sdf
+
+
+def apply_field_proprieties ( domains_dict, title='TEST_FL'):
+    """Applies Domains, Field Lengths and Field Types to the published Feature Layer"""
     # Retrieve the published feature layer
     feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
     feature_layer = feature_layer_item.layers[0]
@@ -331,15 +349,15 @@ if __name__ == "__main__":
     #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
     #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
 
-    logging.info('\nConnecting to AGOL')
+    logging.info('\nConnecting to AGO')
     AGO_HOST = os.getenv('AGO_HOST')
     AGO_USERNAME = os.getenv('AGO_USERNAME')
     AGO_PASSWORD = os.getenv('AGO_PASSWORD')
     gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
 
-    logging.info('\nCreating domains and field proprities')
-    domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
-
     logging.info('\nPublishing the Mater Dataset to AGO')
-    publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD')
+    sfd= publish_feature_layer(df, title='TEST_FL', folder='2024_CWD')
 
+    #logging.info('\nApplying field proprities to the Feature Layer')
+    #domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
+    #apply_field_proprieties ( domains_dict, title='TEST_FL')
