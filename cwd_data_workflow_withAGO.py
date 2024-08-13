@@ -3,28 +3,31 @@
 #
 # Purpose:     This script automates the CWD data workflow. It combines
 #              incoming data saved in Object Storage and exports a master dataset.
-#              The master dataset id then published to ArcGIS Online (AGO).
-#
-# Input(s):    (1) S3 Object Storage credentials. 
-#              (2) AGO ArcGIS Online credentials.          
+#              The master datset is then published to AGOL.
+#              
+# Input(s):    (1) Object Storage credentials.
+#              (1) AGO credentials.           
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-09
+# Created:     2024-08-12
 # Updated:     
 #-------------------------------------------------------------------------------
 
+import warnings
+warnings.simplefilter(action='ignore')
+
 import os
 import re
-import json
-import requests
 import boto3
 import botocore
 import pandas as pd
 import numpy as np
 from io import BytesIO
-import geopandas as gpd
-from shapely.geometry import Point
+
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor, GeoSeriesAccessor
+from arcgis.features import FeatureLayerCollection
 
 from datetime import datetime
 import logging
@@ -70,12 +73,15 @@ def get_incoming_data_from_os(s3_client):
         for page in paginator.paginate(Bucket=bucket_name):
             for obj in page.get('Contents', []):
                 key = obj['Key']
-                if key.startswith('incoming_from_idir') and key.endswith('.xlsx') and 'test_incoming' in key.lower():
+                if key.endswith('.xlsx') and 'cwd_lab_submissions' in key.lower():
                     try:
                         logging.info(f"...reading file: {key}")
                         obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
-                        df = pd.read_excel(BytesIO(obj_data['Body'].read()), 
-                                           sheet_name='Sampling')
+                        df = pd.read_excel(BytesIO(obj_data['Body'].read()),
+                                           header=2,
+                                           sheet_name='Sampling Sheet')
+                        df = df[df['WLH_ID'].notna()] #remove empty rows
+                        
                         df_list.append(df)
                     except botocore.exceptions.BotoCoreError as e:
                         logging.error(f"...failed to retrieve file: {e}")
@@ -116,27 +122,24 @@ def process_master_dataset(df):
     Fromat Datetime columns
     """
     logging.info("..formatting columns ")
-    df['Latitude (DD)'] = pd.to_numeric(df['Latitude (DD)'], errors='coerce')
-    df['Longitude (DD)'] = pd.to_numeric(df['Longitude (DD)'], errors='coerce')
+    df['LATITUDE_DD'] = pd.to_numeric(df['LATITUDE_DD'], errors='coerce')
+    df['LONGITUDE_DD'] = pd.to_numeric(df['LONGITUDE_DD'], errors='coerce')
     
     def set_source_value(row):
-        if pd.notna(row['Longitude (DD)']) and pd.notna(row['Latitude (DD)']):
-            if 47.0 <= row['Latitude (DD)'] <= 60.0 and -145.0 <= row['Longitude (DD)'] <= -113.0:
+        if pd.notna(row['LATITUDE_DD']) and pd.notna(row['LONGITUDE_DD']):
+            if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
                 return 'Entered by User'
             else:
                 return 'Incorrectly entered by user'
         return np.nan
 
-    df['LatLong Source'] = df.apply(set_source_value, axis=1)
-    
-    df['LatLong Accuracy'] = None
+    df['SPATIAL_CAPTURE_DESCRIPTOR'] = df.apply(set_source_value, axis=1)
     
     columns = list(df.columns)
-    longitude_index = columns.index('Longitude (DD)')
-    columns.remove('LatLong Source')
-    columns.remove('LatLong Accuracy')
-    columns.insert(longitude_index + 1, 'LatLong Source')
-    columns.insert(longitude_index + 2, 'LatLong Accuracy')
+    long_index = columns.index('LONGITUDE_DD')
+    columns.remove('SPATIAL_CAPTURE_DESCRIPTOR')
+    columns.insert(long_index + 1, 'SPATIAL_CAPTURE_DESCRIPTOR')
+
     df = df[columns]
     
     #correct errrors in MU column
@@ -150,38 +153,39 @@ def process_master_dataset(df):
             parts[1] = parts[1][1:]
         return '-'.join(parts)
     
-    df['MU'] = df['MU'].apply(correct_mu_value)
+    df['WMU'] = df['WMU'].apply(correct_mu_value)
     
-    logging.info("..retrieving latlon from MU centroids")
-    #populate lat/long from MU centroid
+    logging.info("..retrieving latlon from MU centroid")
+    #populate lat/long MU centroid centroid
     def latlong_from_MU(row, df_mu):
-        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['MU'] != 'Not Recorded':
-            mu_value = row['MU']
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['WMU'] != 'Not Recorded':
+            mu_value = row['WMU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
-                row['LatLong Source'] = 'From MU'
+                row['LATITUDE_DD'] = match['CENTER_LAT'].values[0]
+                row['LONGITUDE_DD'] = match['CENTER_LONG'].values[0]
+                row['SPATIAL_CAPTURE_DESCRIPTOR'] = 'MU centroid'
         return row
     
     df = df.apply(lambda row: latlong_from_MU(row, df_mu), axis=1)
     
     logging.info("..retrieving latlon from Region centroids")
-    #populate lat/long from Region centroid
+    #populate lat/long Region centroid centroid
     def latlong_from_Region(row, df_rg):
-        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['Region'] != 'Not Recorded':
-            rg_value = row['Region']
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['ENV_REGION_NAME'] != 'Not Recorded':
+            rg_value = row['ENV_REGION_NAME']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
-                row['LatLong Source'] = 'From Region'
+                row['LATITUDE_DD'] = match['CENTER_LAT'].values[0]
+                row['LONGITUDE_DD'] = match['CENTER_LONG'].values[0]
+                row['SPATIAL_CAPTURE_DESCRIPTOR'] = 'Region centroid'
         return row
     
     df = df.apply(lambda row: latlong_from_Region(row, df_rg), axis=1)
-    
-    df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
-    df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+      
+    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp
+    current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    df['GIS_LOAD_VERSION_DATE'] = current_datetime
     
     # format datetime columns. STILL WORKING ON THIS. 
     '''
@@ -212,301 +216,92 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
         
 
-def df_to_gdf(df, lat_col, lon_col, crs=4326):
-    """
-    Converts a DataFrame with latitude and longitude columns to a GeoDataFrame
-    """
-    geometry = [Point(xy) for xy in zip(df[lon_col], df[lat_col])]
-    gdf = gpd.GeoDataFrame(df, geometry=geometry)
-    gdf.set_crs(epsg=crs, inplace=True)  
-        
-    #convert datetime cols to str: needed to publish to AGO later on
-    for column in gdf.columns:
-        if pd.api.types.is_datetime64_any_dtype(gdf[column]):
-            gdf[column] = gdf[column].astype(str)
-    
-    return gdf
+def connect_to_AGO (HOST, USERNAME, PASSWORD):
+    """ 
+    Connects to AGOL
+    """     
+    gis = GIS(HOST, USERNAME, PASSWORD)
 
-def export_gdf_to_shapefile (gdf, s3_client, shapefile_name, bucket_name='whcwdd', subfolder='spatial'):
-    """
-    Exports a GeoDataFrame to a shapefile and uploads it to object storage.
-    """
-    try:
-        # Write GeoDataFrame to a temporary file-like object
-        with gpd.io.file.fiona_env():
-            with BytesIO() as fileobj:
-                gdf.to_file(fileobj, driver='ESRI Shapefile')
-                fileobj.seek(0)
-                
-                # Upload shapefile to object storage
-                s3_key = f'{subfolder}/{shapefile_name}.zip'
-                s3_client.upload_fileobj(fileobj, bucket_name, s3_key)
-        
-        logging.info(f'..shapefile uploaded successfully to {bucket_name}/{subfolder}')
-        return True
+    # Test if the connection is successful
+    if gis.users.me:
+        logging.info('..successfully connected to AGOL as {}'.format(gis.users.me.username))
+    else:
+        logging.error('..connection to AGOL failed.')
     
-    except Exception as e:
-        logging.error(f'...failed to export or upload shapefile: {e}')
-        return False
+    return gis
 
 
-def prepare_df_for_ago(df):
+def construct_domains_dict(s3_client, bucket_name='whcwdd'):
     """
-    Cleans up df column names and coordinates for AGO.
+    Constructs a dictionnary containing Domains data based on Picklists
     """
-    df_ago = df.copy()
+    prefix= 'incoming_from_idir/data_dictionary/'
+
+    objects = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)['Contents']
+
+    # Filter to only include the latest Data dictionnary file
+    xlsx_files = [obj for obj in objects if obj['Key'].endswith('.xlsx')]
+    latest_file = max(xlsx_files, key=lambda x: x['LastModified'])
+
+    latest_file_key = latest_file['Key']
+    obj = s3_client.get_object(Bucket=bucket_name, Key=latest_file_key)
+    data = obj['Body'].read()
+    excel_file = pd.ExcelFile(BytesIO(data))
+
+    df_datadict = pd.read_excel(excel_file, sheet_name='Data Dictionary')
+    df_pcklists = pd.read_excel(excel_file, sheet_name='Picklists')
+
+    df_domfields = df_datadict[['Domain Name', 'GIS Field_Name (does not have to match WHIS)\n(in progress for use in GIS/GDB, when implemented)']].dropna(subset=['Domain Name'])
+    df_domfields = df_domfields.rename(columns={'GIS Field_Name (does not have to match WHIS)\n(in progress for use in GIS/GDB, when implemented)': 'GIS Field Name'})
+    field_match_dict = df_domfields.set_index('Domain Name')['GIS Field Name'].to_dict()
+
+    df_pcklists = df_pcklists.rename(columns=field_match_dict)
+
+    domains_dict = {} 
+    # Iterate through each column (field) in the DataFrame
+    for column in df_pcklists.columns:
+        # Extract the field name and values
+        field_name = column
+        values = df_pcklists[field_name].dropna().tolist()  # Drop NaN values and convert to list
+
+        # Create the domain dictionary for the field
+        domain_values = {str(value): str(value) for value in values}
+        domains_dict[field_name] = domain_values
     
-    # exclude these private columns from df_ago
-    private_cols = ['Submitter First Name', 'Submitter Last Name', 'Phone', 'FWID #']
-    
-    # Remove private columns from df_ago
-    df_ago = df_ago.drop(columns=private_cols, errors='ignore')
-    
-    def clean_name(name):
-        # Remove specified special characters
-        for char in ['(', ')', '#', '-', ' ', "'"]:
-            name = name.replace(char, '')
-        return name
-    
-    # Apply the cleaning function to all column names
-    df_ago.columns = [clean_name(col) for col in df_ago.columns]
-    
-    # Drop rows with NaN values in LatLongSource column
-    df_ago = df_ago.dropna(subset=['LatLongSource'])
-    
-    return df_ago
+    return domains_dict
 
 
-def get_ago_token(TOKEN_URL, HOST, USERNAME, PASSWORD):
+def publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD'):
     """
-    Returns an access token to AGOL account
+    Publishes the master dataset to AGO and applies domains (value lists)
     """
-    params = {
-        'username': USERNAME,
-        'password': PASSWORD,
-        'referer': HOST,
-        'f': 'json'
-    }
-    
-    try:
-        # Send request to get token
-        response = requests.post(TOKEN_URL, data=params, verify=True) # Enable SSL verification
+    # Create a Spatial DataFrame
+    sdf = pd.DataFrame.spatial.from_xy(df, x_column='LATITUDE_DD', y_column='LONGITUDE_DD')
 
-        # Check response status
-        response.raise_for_status()
+    # Publish a feature layer
+    sdf.spatial.to_featurelayer(title=title, gis=gis, folder=folder)
 
-        logging.info("...successfully obtained AGO access token.")
-        
-        return response.json().get('token')
-    
-    except requests.exceptions.RequestException as e:
-        logging.error(f"...failed to obtain access token: {e}")
-        raise
-        
-        
-def get_ago_folderID(token, username, folder_name):
-    """
-    Get or create a folder in ArcGIS Online.
-    """
-    folders_url = f"https://www.arcgis.com/sharing/rest/content/users/{username}"
-    params = {
-        'f': 'json',
-        'token': token,
-    }
+    # Retrieve the published feature layer
+    feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
+    feature_layer = feature_layer_item.layers[0]
 
-    try:
-        # Check if the folder exists
-        response = requests.post(folders_url, data=params, verify=True)
-        response.raise_for_status()
-        folders = response.json().get('folders', [])
-        
-        for folder in folders:
-            if folder['title'] == folder_name:
-                logging.info(f"...folder '{folder_name}' already exists.")
-                return folder['id']
-        
-        # Create the folder if it does not exist
-        create_folder_url = f"{folders_url}/createFolder"
-        create_params = {
-            'f': 'json',
-            'title': folder_name,
-            'token': token
+    # Apply Domains
+    for field, domain_values in domains_dict.items():
+        domain = {
+            "type": "codedValue",
+            "name": f"{field}_domain",
+            "codedValues": [{"name": k, "code": v} for k, v in domain_values.items()]
         }
-        
-        create_response = requests.post(create_folder_url, data=create_params, verify=True)
-        create_response.raise_for_status()
-        
-        logging.info(f"...folder '{folder_name}' created successfully.")
-        return create_response.json().get('folder').get('id')
-    
-    except requests.exceptions.RequestException as e:
-        logging.error(f"...failed to create or get folder: {e}")
-        raise
-            
-
-def create_feature_service(token, username, folder_id, service_name):
-    """
-    Creates a Feature Service in ArcGIS online
-    """
-    params = {
-        'f': 'json',
-        'token': token,
-        'createParameters': json.dumps({
-            'name': service_name,
-            'serviceDescription': '',
-            'hasStaticData': False,
-            'maxRecordCount': 1000,
-            'supportedQueryFormats': 'JSON',
-            'capabilities': 'Create,Delete,Query,Update,Editing',
-            'initialExtent': {
-                'xmin': -180,
-                'ymin': -90,
-                'xmax': 180,
-                'ymax': 90,
-                'spatialReference': {'wkid': 4326}
-            },
-            'allowGeometryUpdates': True,
-            'units': 'esriDecimalDegrees',
-            'xssPreventionInfo': {'xssPreventionEnabled': True, 'xssPreventionRule': 'InputOnly', 'xssInputRule': 'rejectInvalid'}
-        }),
-        'tags': 'feature service',
-        'title': service_name
-    }
-    CREATE_SERVICE_URL = f'https://www.arcgis.com/sharing/rest/content/users/{username}/{folder_id}/createService'
-    response = requests.post(CREATE_SERVICE_URL, data=params)
-    response_json = response.json()
-    if 'serviceItemId' in response_json and 'encodedServiceURL' in response_json:
-        service_id = response_json['serviceItemId']
-        service_url = response_json['encodedServiceURL']
-        admin_url = service_url.replace('/rest/', '/rest/admin/')
-        logging.info(f"...feature service created successfully with ID: {service_id}")
-        return service_id, admin_url
-    else:
-        raise Exception(f"Error creating feature service: {response_json}")
-
-
-def add_layer_to_service(token, admin_url, df, latcol, longcol):
-    """
-    Adds a Point Layer to the Feature Service
-    """
-    add_to_definition_url = f"{admin_url}/addToDefinition"
-
-    fields = [{
-        "name": "ObjectID",
-        "type": "esriFieldTypeOID",
-        "alias": "ObjectID",
-        "sqlType": "sqlTypeOther",
-        "nullable": False,
-        "editable": False,
-        "domain": None,
-        "defaultValue": None
-    }]
-    
-    for col in df.columns:
-        fields.append({
-            "name": col,
-            "type": "esriFieldTypeString",  # Assuming all fields are string
-            "alias": col,
-            "sqlType": "sqlTypeOther",
-            "nullable": True,
-            "editable": True,
-            "domain": None,
-            "defaultValue": None
-        })
-
-    # Calculate extent from the lat/long columns
-    xmin = df[longcol].min()
-    ymin = df[latcol].min()
-    xmax = df[longcol].max()
-    ymax = df[latcol].max()
-
-    layer_definition = {
-        "layers": [
-            {
-                "name": "Points",
-                "type": "Feature Layer",
-                "geometryType": "esriGeometryPoint",
-                "fields": fields,
-                "extent": {
-                    "xmin": xmin,
-                    "ymin": ymin,
-                    "xmax": xmax,
-                    "ymax": ymax,
-                    "spatialReference": {"wkid": 4326}
-                }
-            }
-        ]
-    }
-
-    params = {
-        'f': 'json',
-        'token': token,
-        'addToDefinition': json.dumps(layer_definition)
-    }
-    response = requests.post(add_to_definition_url, data=params)
-
-    response_json = response.json()
-    if 'success' in response_json and response_json['success']:
-        logging.info("...layer added to the feature service successfully")
-        return True
-    else:
-        raise Exception(f"Error adding layer to feature service: {response_json}")
+        field_info = {
+            "name": field,
+            "domain": domain
+        }
+        feature_layer.manager.update_definition({"fields": [field_info]})
         
         
-def add_features(token, service_url, df, latcol, longcol):
-    """
-    Adds data (features) to the Feature Service Layer
-    """
-    add_features_url = f"{service_url}/0/addFeatures"
-    features = []
-    for index, row in df.iterrows():
-        try:
-            attributes = {}
-            for col in df.columns:
-                value = row[col]
-                if isinstance(value, datetime):
-                    value = value.isoformat()
-                elif pd.isna(value):
-                    value = None
-                attributes[col] = value
-
-            feature = {
-                'geometry': {
-                    'x': float(row[longcol]),
-                    'y': float(row[latcol]),
-                    'spatialReference': {'wkid': 4326}
-                },
-                'attributes': attributes
-            }
-            features.append(feature)
-        except Exception as e:
-            logging.error(f"Error processing row {index}: {e}")
-
-    if not features:
-        logging.error("No valid features to add")
-        return []
-
-    params = {
-        'f': 'json',
-        'token': token,
-        'features': json.dumps(features)
-    }
-    
-    try:
-        response = requests.post(add_features_url, data=params)
-        response.raise_for_status()
-        response_json = response.json()
         
-        if 'addResults' in response_json:
-            successful_adds = sum(1 for result in response_json['addResults'] if result.get('success', False))
-            logging.info(f"...{successful_adds} out of {len(features)} features added successfully")
-            return response_json['addResults']
-        else:
-            logging.error(f"Error adding features: {response_json}")
-            return []
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed: {e}")
-        return []
+        
+        
         
         
         
@@ -526,56 +321,25 @@ if __name__ == "__main__":
         
         logging.info('\nRetrieving Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
+    
         
-    logging.info('\nPopulating missing latlon values')
+    logging.info('\nProcessing the master dataset')
     df= process_master_dataset (df)
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
-    save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
-    save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
+    #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
+    #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
 
-    logging.info('\nPrepare the Dataframe for AGO publishing')
-    df_ago= prepare_df_for_ago(df)
-    
-
-    logging.info('\nPublishing the Master Dataset to AGO')
-    logging.info('..connecting to AGO')
-    AGO_TOKEN_URL = os.getenv('AGO_TOKEN_URL')
+    logging.info('\nConnecting to AGOL')
     AGO_HOST = os.getenv('AGO_HOST')
     AGO_USERNAME = os.getenv('AGO_USERNAME')
     AGO_PASSWORD = os.getenv('AGO_PASSWORD')
-    AGO_ACCOUNT_ID = os.getenv('AGO_ACCOUNT_ID')
-    
-    token = get_ago_token(AGO_TOKEN_URL, AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
-    
-    logging.info('..getting AGO folder ID')
-    folder_name= "Hackathon_2024_Survey123"
-    folderID= get_ago_folderID(token, AGO_USERNAME, folder_name)
-    
+    gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
 
-    logging.info('..creating a Feature Service')
-    service_name= "CWD_Master_dataset"
-    service_id, admin_url = create_feature_service(token, AGO_USERNAME, folderID, service_name)
-    
-    logging.info('..adding a layer to the Feature Service')
-    layer_added = add_layer_to_service(token, admin_url, df_ago, 'LatitudeDD', 'LongitudeDD')
-    
-    logging.info('..loading data to the Feature Service Layer')
-    service_url = admin_url.replace('/admin/', '/')
-    add_features_response = add_features(token, service_url, df_ago, 'LatitudeDD', 'LongitudeDD')
-    
-    logging.info('\nCreating a GeoDataframe')
-    gdf= df_to_gdf(df_ago, 'LatitudeDD', 'LongitudeDD', crs=4326)  
-    
-    
-    
-    #This is not working for now...
-    '''
-    logging.info('\nExporting to shapefile')
-    export_gdf_to_shapefile (gdf, s3_client, 'CWD_Master_dataset', bucket_name='whcwdd', subfolder='spatial')
-    '''
-    
-    
-    
+    logging.info('\nCreating domains and field proprities')
+    domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
+
+    logging.info('\nPublishing the Mater Dataset to AGO')
+    publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD')
 
