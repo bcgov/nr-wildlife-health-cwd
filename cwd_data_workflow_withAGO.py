@@ -117,6 +117,7 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     return df_rg, df_mu
     
 def get_hunter_data_from_ago(gis, HUNTER_ITEM_ID):
+    logging.info("..getting hunter survey data from AGO")
     # get the ago item
     hunter_survey_item = gis.content.get(HUNTER_ITEM_ID)
 
@@ -217,50 +218,47 @@ def process_master_dataset(df):
 
 def join_master_and_hunter_df(df, hunter_df):
     """
-    Returns cleaned dataframes. One w/ matched hunter survey responses and one w/o hunter survey responses
+    Returns the final dataframe including hunter survey responses
     """
-    # df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
-    # hunter_df['HUNTER_CWD_EAR_CARD_ID'] = hunter_df['HUNTER_CWD_EAR_CARD_ID'].astype('string') # i don't think I need to convert to string as both fields are integers
+    # convert CWD Ear Card from df to type string
+    df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
     
+    logging.info("..merging dataframes")
     # merge the dataframes
     combined_df = pd.merge(left=df,
                            right=hunter_df,
                            how="left",
                            left_on="CWD_EAR_CARD_ID",
-                           right_on="HUNTER_CWD_EAR_CARD_ID")
+                           right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
     
+    # drop unnecessary columns
+    logging.info("..dropping unnecessary columns")
+    columns_to_drop = ['OBJECTID', 'GlobalID', 'CreationDate', 'Creator', 'EditDate', 'bc_gov_header', 'disclaimer_text', 'email_message', 'SHAPE']
+    combined_df = combined_df.drop(columns_to_drop, axis=1)
+    
+    logging.info("..cleaning dataframes")
     # filter df for where hunters have updated data
     hunter_matches_df = combined_df[combined_df.HUNTER_SEX.notnull()].copy()
 
     # filter df for where hunters have not updated data
     xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
 
-    # transform coordinates to Web Mercator 
-    transformer = Transformer.from_crs("epsg:3857", "epsg:4326")
-    
-    def transform_coords(geometry):
-        x, y = geometry['x'], geometry['y']
-        return transformer.transform(x, y)
-
-    hunter_matches_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = hunter_matches_df['SHAPE_y'].apply( 
-        lambda x: pd.Series(transform_coords(x))
-    )
-
-    xls_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = xls_df['SHAPE_x'].apply( 
-        lambda x: pd.Series(transform_coords(x))
-    )
-
-    # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = hunter
-    hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter"
-    # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value from LatLongSource
+    # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = Hunter Survey
+    hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter Survey"
+    # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value = Ear Card
     xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
     
     # clean up xls_df to comform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
 
-    xls_df.to_clipboard()
+    # populate MAP_LATITUDE and MAP_LONGITUDE columns
+    hunter_matches_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = hunter_matches_df[['HUNTER_LATITUDE_DD', 'HUNTER_LONGITUDE_DD']]
+    xls_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = xls_df[['LATITUDE_DD', 'LONGITUDE_DD']]
 
-    return xls_df, hunter_matches_df
+    # re-combine dataframes
+    final_df = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
+
+    return final_df
       
 
 def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
@@ -338,7 +336,7 @@ def publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD'):
     Publishes the master dataset to AGO and applies domains (value lists)
     """
     # Create a Spatial DataFrame
-    sdf = pd.DataFrame.spatial.from_xy(df, x_column='LATITUDE_DD', y_column='LONGITUDE_DD')
+    sdf = pd.DataFrame.spatial.from_xy(df, x_column='MAP_LONGITUDE', y_column='MAP_LATITUDE')
 
     # Publish a feature layer
     sdf.spatial.to_featurelayer(title=title, gis=gis, folder=folder)
@@ -399,15 +397,18 @@ if __name__ == "__main__":
 
     logging.info('\nMerging master df w/ hunter survey df')
     xls_df, hunter_df = join_master_and_hunter_df(df, hunter_df)
+
+    logging.info('\nMerging master df w/ hunter survey df')
+    final_df = join_master_and_hunter_df(df, hunter_df)
     
-    # logging.info('\nSaving a Master Dataset')
-    # dytm = datetime.now().strftime("%Y%m%d_%H%M")
-    # #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
-    # #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
+    logging.info('\nSaving a Master Dataset')
+    dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    #save_xlsx_to_os(s3_client, 'whcwdd', final_df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
+    #save_xlsx_to_os(s3_client, 'whcwdd', final_df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
 
-    # logging.info('\nCreating domains and field proprities')
-    # domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
+    logging.info('\nCreating domains and field proprities')
+    domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
 
-    # logging.info('\nPublishing the Mater Dataset to AGO')
-    # publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD')
+    logging.info('\nPublishing the Mater Dataset to AGO')
+    publish_feature_layer(final_df, domains_dict, title='TEST_FL', folder='2024_CWD')
 
