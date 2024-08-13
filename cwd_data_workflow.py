@@ -8,9 +8,12 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #
-# Created:     2024-07-05
+# Created:     2024-08-09
 # Updated:     
 #-------------------------------------------------------------------------------
+
+import warnings
+warnings.simplefilter(action='ignore')
 
 import os
 import re
@@ -63,12 +66,15 @@ def get_incoming_data_from_os(s3_client):
         for page in paginator.paginate(Bucket=bucket_name):
             for obj in page.get('Contents', []):
                 key = obj['Key']
-                if key.startswith('incoming_from_idir') and key.endswith('.xlsx') and 'test_incoming' in key.lower():
+                if key.endswith('.xlsx') and 'cwd_lab_submissions' in key.lower():
                     try:
                         logging.info(f"...reading file: {key}")
                         obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
-                        df = pd.read_excel(BytesIO(obj_data['Body'].read()), 
-                                           sheet_name='Sampling')
+                        df = pd.read_excel(BytesIO(obj_data['Body'].read()),
+                                           header=2,
+                                           sheet_name='Sampling Sheet')
+                        df = df[df['WLH_ID'].notna()] #remove empty rows
+                        
                         df_list.append(df)
                     except botocore.exceptions.BotoCoreError as e:
                         logging.error(f"...failed to retrieve file: {e}")
@@ -109,27 +115,24 @@ def process_master_dataset(df):
     Fromat Datetime columns
     """
     logging.info("..formatting columns ")
-    df['Latitude (DD)'] = pd.to_numeric(df['Latitude (DD)'], errors='coerce')
-    df['Longitude (DD)'] = pd.to_numeric(df['Longitude (DD)'], errors='coerce')
+    df['LATITUDE_DD'] = pd.to_numeric(df['LATITUDE_DD'], errors='coerce')
+    df['LONGITUDE_DD'] = pd.to_numeric(df['LONGITUDE_DD'], errors='coerce')
     
     def set_source_value(row):
-        if pd.notna(row['Longitude (DD)']) and pd.notna(row['Latitude (DD)']):
-            if 47.0 <= row['Latitude (DD)'] <= 60.0 and -145.0 <= row['Longitude (DD)'] <= -113.0:
+        if pd.notna(row['LATITUDE_DD']) and pd.notna(row['LONGITUDE_DD']):
+            if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
                 return 'Entered by User'
             else:
                 return 'Incorrectly entered by user'
         return np.nan
 
-    df['LatLong Source'] = df.apply(set_source_value, axis=1)
-    
-    df['LatLong Accuracy'] = None
+    df['SPATIAL_CAPTURE_DESCRIPTOR'] = df.apply(set_source_value, axis=1)
     
     columns = list(df.columns)
-    longitude_index = columns.index('Longitude (DD)')
-    columns.remove('LatLong Source')
-    columns.remove('LatLong Accuracy')
-    columns.insert(longitude_index + 1, 'LatLong Source')
-    columns.insert(longitude_index + 2, 'LatLong Accuracy')
+    long_index = columns.index('LONGITUDE_DD')
+    columns.remove('SPATIAL_CAPTURE_DESCRIPTOR')
+    columns.insert(long_index + 1, 'SPATIAL_CAPTURE_DESCRIPTOR')
+
     df = df[columns]
     
     #correct errrors in MU column
@@ -143,38 +146,44 @@ def process_master_dataset(df):
             parts[1] = parts[1][1:]
         return '-'.join(parts)
     
-    df['MU'] = df['MU'].apply(correct_mu_value)
+    df['WMU'] = df['WMU'].apply(correct_mu_value)
     
-    logging.info("..retrieving latlon from MU centroids")
-    #populate lat/long from MU centroid
+    logging.info("..retrieving latlon from MU centroid")
+    #populate lat/long MU centroid centroid
     def latlong_from_MU(row, df_mu):
-        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['MU'] != 'Not Recorded':
-            mu_value = row['MU']
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['WMU'] != 'Not Recorded':
+            mu_value = row['WMU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
-                row['LatLong Source'] = 'From MU'
+                row['LATITUDE_DD'] = match['CENTER_LAT'].values[0]
+                row['LONGITUDE_DD'] = match['CENTER_LONG'].values[0]
+                row['SPATIAL_CAPTURE_DESCRIPTOR'] = 'MU centroid'
         return row
     
     df = df.apply(lambda row: latlong_from_MU(row, df_mu), axis=1)
     
     logging.info("..retrieving latlon from Region centroids")
-    #populate lat/long from Region centroid
+    #populate lat/long Region centroid centroid
     def latlong_from_Region(row, df_rg):
-        if (pd.isnull(row['LatLong Source']) or row['LatLong Source'] == 'Incorrectly entered by user') and row['Region'] != 'Not Recorded':
-            rg_value = row['Region']
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['ENV_REGION_NAME'] != 'Not Recorded':
+            rg_value = row['ENV_REGION_NAME']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
-                row['Latitude (DD)'] = match['CENTER_LAT'].values[0]
-                row['Longitude (DD)'] = match['CENTER_LONG'].values[0]
-                row['LatLong Source'] = 'From Region'
+                row['LATITUDE_DD'] = match['CENTER_LAT'].values[0]
+                row['LONGITUDE_DD'] = match['CENTER_LONG'].values[0]
+                row['SPATIAL_CAPTURE_DESCRIPTOR'] = 'Region centroid'
         return row
     
     df = df.apply(lambda row: latlong_from_Region(row, df_rg), axis=1)
-    
-    df.loc[df['LatLong Source'] == 'Entered by User', 'LatLong Accuracy'] = 'Exact'
-    df.loc[df['LatLong Source'].isin(['From MU', 'From Region']), 'LatLong Accuracy'] = 'Estimate'
+      
+    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp
+    current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    df['GIS_LOAD_VERSION_DATE'] = current_datetime
+
+    cols = list(df.columns)
+    spacc_index = cols.index('SPATIAL_CAPTURE_ACCURACY')
+    cols.insert(spacc_index + 1, cols.pop(cols.index('GIS_LOAD_VERSION_DATE')))
+    df = df[cols]
     
     # format datetime columns. STILL WORKING ON THIS. 
     '''
@@ -221,11 +230,10 @@ if __name__ == "__main__":
         
         logging.info('\nRetrieving Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
-        
-    logging.info('\nPopulating missing latlon values')
-    df= process_master_dataset (df)
     
-    df_test= df.loc[df['CWD Ear Card']==19296]
+        
+    logging.info('\nProcessing the master dataset')
+    df= process_master_dataset (df)
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
