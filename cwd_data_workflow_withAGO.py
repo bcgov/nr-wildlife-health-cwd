@@ -258,6 +258,8 @@ def join_master_and_hunter_df(df, hunter_df):
     # clean up xls_df to comform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
 
+    xls_df.to_clipboard()
+
     return xls_df, hunter_matches_df
       
 
@@ -398,14 +400,14 @@ if __name__ == "__main__":
     logging.info('\nMerging master df w/ hunter survey df')
     xls_df, hunter_df = join_master_and_hunter_df(df, hunter_df)
     
-    logging.info('\nSaving a Master Dataset')
-    dytm = datetime.now().strftime("%Y%m%d_%H%M")
-    #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
-    #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
+    # logging.info('\nSaving a Master Dataset')
+    # dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    # #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
+    # #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
 
-    logging.info('\nCreating domains and field proprities')
-    domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
+    # logging.info('\nCreating domains and field proprities')
+    # domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
 
-    logging.info('\nPublishing the Mater Dataset to AGO')
-    publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD')
+    # logging.info('\nPublishing the Mater Dataset to AGO')
+    # publish_feature_layer(df, domains_dict, title='TEST_FL', folder='2024_CWD')
 
