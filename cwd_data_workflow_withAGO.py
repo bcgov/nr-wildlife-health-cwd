@@ -24,6 +24,7 @@ import botocore
 import pandas as pd
 import numpy as np
 from io import BytesIO
+from pyproj import Transformer
 
 from arcgis.gis import GIS
 from arcgis.features import GeoAccessor, GeoSeriesAccessor
@@ -213,6 +214,51 @@ def process_master_dataset(df):
     '''
     
     return df
+
+def join_master_and_hunter_df(df, hunter_df):
+    """
+    Returns cleaned dataframes. One w/ matched hunter survey responses and one w/o hunter survey responses
+    """
+    # df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
+    # hunter_df['HUNTER_CWD_EAR_CARD_ID'] = hunter_df['HUNTER_CWD_EAR_CARD_ID'].astype('string') # i don't think I need to convert to string as both fields are integers
+    
+    # merge the dataframes
+    combined_df = pd.merge(left=df,
+                           right=hunter_df,
+                           how="left",
+                           left_on="CWD_EAR_CARD_ID",
+                           right_on="HUNTER_CWD_EAR_CARD_ID")
+    
+    # filter df for where hunters have updated data
+    hunter_matches_df = combined_df[combined_df.HUNTER_SEX.notnull()].copy()
+
+    # filter df for where hunters have not updated data
+    xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
+
+    # transform coordinates to Web Mercator 
+    transformer = Transformer.from_crs("epsg:3857", "epsg:4326")
+    
+    def transform_coords(geometry):
+        x, y = geometry['x'], geometry['y']
+        return transformer.transform(x, y)
+
+    hunter_matches_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = hunter_matches_df['SHAPE_y'].apply( 
+        lambda x: pd.Series(transform_coords(x))
+    )
+
+    xls_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = xls_df['SHAPE_x'].apply( 
+        lambda x: pd.Series(transform_coords(x))
+    )
+
+    # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = hunter
+    hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter"
+    # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value from LatLongSource
+    xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
+    
+    # clean up xls_df to comform with ago field requirements 
+    xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
+
+    return xls_df, hunter_matches_df
       
 
 def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
@@ -348,6 +394,9 @@ if __name__ == "__main__":
         
     logging.info('\nProcessing the master dataset')
     df= process_master_dataset (df)
+
+    logging.info('\nMerging master df w/ hunter survey df')
+    xls_df, hunter_df = join_master_and_hunter_df(df, hunter_df)
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
