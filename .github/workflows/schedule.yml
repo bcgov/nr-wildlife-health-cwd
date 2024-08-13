@@ -10,7 +10,7 @@ on:
 
 jobs:
   run-script:
-    if: github.repository == 'emarmitage/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run
+    if: github.repository == 'bcgov/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run
     runs-on: ubuntu-latest
 
     env:
@@ -38,4 +38,4 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run the script
-      run: python cwd_data_workflow_withAGO.py
+      run: python cwd_data_workflow.py
