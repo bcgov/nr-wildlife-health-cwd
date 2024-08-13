@@ -55,7 +55,20 @@ def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to connect to Object Storage: {e.response["Error"]["Message"]}')
         return None
+    
+def connect_to_AGO (HOST, USERNAME, PASSWORD):
+    """ 
+    Connects to AGOL
+    """     
+    gis = GIS(HOST, USERNAME, PASSWORD)
 
+    # Test if the connection is successful
+    if gis.users.me:
+        logging.info('..successfully connected to AGOL as {}'.format(gis.users.me.username))
+    else:
+        logging.error('..connection to AGOL failed.')
+    
+    return gis
 
 def get_incoming_data_from_os(s3_client):
     """
@@ -214,21 +227,6 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
         logging.info(f'..data successfully saved {file_name}to bucket {bucket_name}')
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
-        
-
-def connect_to_AGO (HOST, USERNAME, PASSWORD):
-    """ 
-    Connects to AGOL
-    """     
-    gis = GIS(HOST, USERNAME, PASSWORD)
-
-    # Test if the connection is successful
-    if gis.users.me:
-        logging.info('..successfully connected to AGOL as {}'.format(gis.users.me.username))
-    else:
-        logging.error('..connection to AGOL failed.')
-    
-    return gis
 
 
 def construct_domains_dict(s3_client, bucket_name='whcwdd'):
