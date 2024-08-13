@@ -55,20 +55,7 @@ def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to connect to Object Storage: {e.response["Error"]["Message"]}')
         return None
-    
-def connect_to_AGO (HOST, USERNAME, PASSWORD):
-    """ 
-    Connects to AGOL
-    """     
-    gis = GIS(HOST, USERNAME, PASSWORD)
 
-    # Test if the connection is successful
-    if gis.users.me:
-        logging.info('..successfully connected to AGOL as {}'.format(gis.users.me.username))
-    else:
-        logging.error('..connection to AGOL failed.')
-    
-    return gis
 
 def get_incoming_data_from_os(s3_client):
     """
@@ -128,6 +115,20 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
             
     return df_rg, df_mu
     
+def get_hunter_data_from_ago(gis, HUNTER_ITEM_ID):
+    # get the ago item
+    hunter_survey_item = gis.content.get(HUNTER_ITEM_ID)
+
+    # get the ago feature layer
+    hunter_flayer = hunter_survey_item.layers[0]
+
+    # query the feature layer to get its data
+    hunter_data = hunter_flayer.query().sdf
+
+    # convert the feature layer data to pandas dataframe
+    hunter_df = pd.DataFrame(hunter_data)
+
+    return hunter_df
 
 def process_master_dataset(df):
     """
@@ -227,6 +228,21 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
         logging.info(f'..data successfully saved {file_name}to bucket {bucket_name}')
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
+        
+
+def connect_to_AGO (HOST, USERNAME, PASSWORD):
+    """ 
+    Connects to AGOL
+    """     
+    gis = GIS(HOST, USERNAME, PASSWORD)
+
+    # Test if the connection is successful
+    if gis.users.me:
+        logging.info('..successfully connected to AGOL as {}'.format(gis.users.me.username))
+    else:
+        logging.error('..connection to AGOL failed.')
+    
+    return gis
 
 
 def construct_domains_dict(s3_client, bucket_name='whcwdd'):
@@ -312,6 +328,12 @@ if __name__ == "__main__":
     S3_CWD_ACCESS_KEY = os.getenv('S3_CWD_ACCESS_KEY')
     S3_CWD_SECRET_KEY = os.getenv('S3_CWD_SECRET_KEY')
     s3_client = connect_to_os(S3_ENDPOINT, S3_CWD_ACCESS_KEY, S3_CWD_SECRET_KEY)
+
+    logging.info('\nConnecting to AGOL')
+    AGO_HOST = os.getenv('AGO_HOST')
+    AGO_USERNAME = os.getenv('AGO_USERNAME')
+    AGO_PASSWORD = os.getenv('AGO_PASSWORD')
+    gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
     
     if s3_client:
         logging.info('\nRetrieving Incoming Data from Object Storage')
@@ -319,7 +341,10 @@ if __name__ == "__main__":
         
         logging.info('\nRetrieving Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
-    
+
+    logging.info('\nGetting Hunter Survey Data from AGOL')
+    HUNTER_AGO_ITEM = os.getenv('HUNTER_AGO_ITEM')
+    hunter_df = get_hunter_data_from_ago(gis, HUNTER_AGO_ITEM)
         
     logging.info('\nProcessing the master dataset')
     df= process_master_dataset (df)
@@ -328,12 +353,6 @@ if __name__ == "__main__":
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
     #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
     #save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
-
-    logging.info('\nConnecting to AGOL')
-    AGO_HOST = os.getenv('AGO_HOST')
-    AGO_USERNAME = os.getenv('AGO_USERNAME')
-    AGO_PASSWORD = os.getenv('AGO_PASSWORD')
-    gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
 
     logging.info('\nCreating domains and field proprities')
     domains_dict= construct_domains_dict(s3_client, bucket_name='whcwdd')
