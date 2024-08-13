@@ -1,6 +1,5 @@
 boto3
 botocore
-arcgis
 requests
 pandas
 numpy
@@ -8,4 +7,3 @@ geopandas
 shapely
 fiona
 openpyxl
-pyproj
