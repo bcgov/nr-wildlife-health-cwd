@@ -24,7 +24,6 @@ import botocore
 import pandas as pd
 import numpy as np
 from io import BytesIO
-from pyproj import Transformer
 
 from arcgis.gis import GIS
 from arcgis.features import GeoAccessor, GeoSeriesAccessor
@@ -216,7 +215,7 @@ def process_master_dataset(df):
     
     return df
 
-def join_master_and_hunter_df(df, hunter_df):
+def join_xls_and_hunter_df(df, hunter_df):
     """
     Returns the final dataframe including hunter survey responses
     """
@@ -396,10 +395,7 @@ if __name__ == "__main__":
     df= process_master_dataset (df)
 
     logging.info('\nMerging master df w/ hunter survey df')
-    xls_df, hunter_df = join_master_and_hunter_df(df, hunter_df)
-
-    logging.info('\nMerging master df w/ hunter survey df')
-    final_df = join_master_and_hunter_df(df, hunter_df)
+    final_df = join_xls_and_hunter_df(df, hunter_df)
     
     logging.info('\nSaving a Master Dataset')
     dytm = datetime.now().strftime("%Y%m%d_%H%M")
