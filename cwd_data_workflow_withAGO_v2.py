@@ -24,12 +24,9 @@ import botocore
 import json
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
 import numpy as np
 from io import BytesIO
-
 from arcgis.gis import GIS
-from arcgis.features import FeatureLayerCollection
 
 import logging
 import timeit
@@ -205,10 +202,29 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
 
     try:
         s3_client.put_object(Bucket=bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
-        logging.info(f'..data successfully saved {file_name}to bucket {bucket_name}')
+        logging.info(f'..data successfully saved {file_name} to bucket {bucket_name}')
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
         
+
+def backup_master_dataset(s3_client, bucket_name):
+    """
+    Creates a backup of the Master dataset
+    """
+    dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    source_file_path = 'master_dataset/cwd_master_dataset.xlsx'
+    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx'
+    
+    try:
+        s3_client.copy_object(
+            Bucket=bucket_name,
+            CopySource={'Bucket': bucket_name, 'Key': source_file_path},
+            Key=destination_file_path
+        )
+        print(f"..old master dataset backed-up successfully")
+    except Exception as e:
+        print(f"..an error occurred: {e}")
+
 
 def connect_to_AGO (HOST, USERNAME, PASSWORD):
     """ 
@@ -429,9 +445,8 @@ if __name__ == "__main__":
     df= process_master_dataset (df)
     
     logging.info('\nSaving a Master Dataset')
-    dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    backup_master_dataset(s3_client, bucket_name='whcwdd')
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
-    save_xlsx_to_os(s3_client, 'whcwdd', df, f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx') #backup
 
     logging.info('\nConnecting to AGO')
     AGO_HOST = os.getenv('AGO_HOST')
