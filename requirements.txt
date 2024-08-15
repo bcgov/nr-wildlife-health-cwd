@@ -1,6 +1,5 @@
 boto3
 botocore
-arcgis
 pandas
 numpy
 geopandas
