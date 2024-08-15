@@ -333,14 +333,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
 
     # Fill NaN and NaT values
     df= df.fillna('')
-    '''
-    print (df.dtypes)
-    for column in df.columns:
-        try:
-            df[column] = df[column].fillna('')
-        except TypeError as e:
-            print(f"Error in column '{column}': {e}") 
-    '''
+
     # Create a spatial dataframe
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longcol], df[latcol]), crs="EPSG:4326")
 
@@ -348,6 +341,8 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     for col in gdf.columns:
         if pd.api.types.is_datetime64_any_dtype(gdf[col]):
             gdf[col] = gdf[col].apply(lambda x: x.isoformat() if not pd.isna(x) else '')
+    
+    gdf = gdf.replace(['nan', '<NA>'], '')
 
     def gdf_to_geojson(gdf):
         features = []
@@ -549,7 +544,7 @@ if __name__ == "__main__":
     folder='2024_CWD'
     latcol='MAP_LATITUDE'
     longcol= 'MAP_LONGITUDE'
-    published_item = publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
+    published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
 
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
