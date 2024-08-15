@@ -34,7 +34,8 @@ from arcgis.gis import GIS
 
 import logging
 import timeit
-from datetime import datetime
+import pytz
+from datetime import datetime, timedelta
 
 
 def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
@@ -203,8 +204,9 @@ def process_master_dataset(df):
       
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df['SPATIAL_CAPTURE_DESCRIPTOR'].fillna('Unknown')
 
-    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp
-    current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp (PACIFIC TIME)
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
     
     return df
@@ -246,7 +248,7 @@ def add_hunter_data_to_master(df, hunter_df):
     
     # drop unnecessary columns
     logging.info("..dropping unnecessary columns")
-    columns_to_drop = ['OBJECTID', 'GlobalID', 'CreationDate', 'Creator', 'EditDate', 
+    columns_to_drop = ['OBJECTID', 'GlobalID', 'CreationDate', 'Editor','Creator', 'EditDate', 
                        'bc_gov_header', 'disclaimer_text', 'email_message', 'SHAPE']
     combined_df = combined_df.drop(columns_to_drop, axis=1)
     
@@ -258,9 +260,10 @@ def add_hunter_data_to_master(df, hunter_df):
     xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
 
     # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = Hunter Survey
+    xls_df['MAP_SOURCE_DESCRIPTOR']=  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
     hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter Survey"
     # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value = Ear Card
-    xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
+    #xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
     
     # clean up xls_df to comform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
@@ -294,7 +297,9 @@ def backup_master_dataset(s3_client, bucket_name):
     """
     Creates a backup of the Master dataset
     """
-    dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
+    dytm = yesterday.strftime("%Y%m%d")
     source_file_path = 'master_dataset/cwd_master_dataset.xlsx'
     destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx'
     
@@ -532,11 +537,12 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
-  
+ 
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
-    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
+    save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
+    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_wHunter.xlsx') #lab + hunter data
 
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
@@ -548,7 +554,6 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
- 
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
