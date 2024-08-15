@@ -34,7 +34,8 @@ from arcgis.gis import GIS
 
 import logging
 import timeit
-from datetime import datetime
+import pytz
+from datetime import datetime, timedelta
 
 
 def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
@@ -203,8 +204,9 @@ def process_master_dataset(df):
       
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df['SPATIAL_CAPTURE_DESCRIPTOR'].fillna('Unknown')
 
-    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp
-    current_datetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp (PACIFIC TIME)
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
     
     return df
@@ -233,8 +235,22 @@ def add_hunter_data_to_master(df, hunter_df):
     """
     Returns the final master df including hunter survey responses.
     """
+    logging.info("..manipulating columns")
     # convert CWD Ear Card from df to type string
     df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
+
+    cols = [
+    "HUNTER_MORTALITY_DATE",
+    "HUNTER_SPECIES",
+    "HUNTER_SEX",
+    "HUNTER_LATITUDE_DD",
+    "HUNTER_LONGITUDE_DD",
+    "HUNTER_ACCURACY_DISTANCE",
+    'HUNTER_CWD_EAR_CARD_ID_TEXT',
+    "HUNTER_CWD_EAR_CARD_ID",
+    "HUNTER_SUBMIT_DATE_TIME"
+    ]   
+    hunter_df =hunter_df[cols]
     
     logging.info("..merging dataframes")
     # merge the dataframes
@@ -244,12 +260,6 @@ def add_hunter_data_to_master(df, hunter_df):
                            left_on="CWD_EAR_CARD_ID",
                            right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
     
-    # drop unnecessary columns
-    logging.info("..dropping unnecessary columns")
-    columns_to_drop = ['OBJECTID', 'GlobalID', 'CreationDate', 'Creator', 'EditDate', 
-                       'bc_gov_header', 'disclaimer_text', 'email_message', 'SHAPE']
-    combined_df = combined_df.drop(columns_to_drop, axis=1)
-    
     logging.info("..cleaning dataframes")
     # filter df for where hunters have updated data
     hunter_matches_df = combined_df[combined_df.HUNTER_SEX.notnull()].copy()
@@ -258,9 +268,10 @@ def add_hunter_data_to_master(df, hunter_df):
     xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
 
     # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = Hunter Survey
+    xls_df['MAP_SOURCE_DESCRIPTOR']=  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
     hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter Survey"
     # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value = Ear Card
-    xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
+    #xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
     
     # clean up xls_df to comform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
@@ -271,6 +282,10 @@ def add_hunter_data_to_master(df, hunter_df):
 
     # re-combine dataframes
     df_wh = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
+
+    # Move columns to the last position
+    df_wh['MAP_SOURCE_DESCRIPTOR'] = df_wh.pop('MAP_SOURCE_DESCRIPTOR')
+    df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')
 
     return df_wh
 
@@ -294,7 +309,9 @@ def backup_master_dataset(s3_client, bucket_name):
     """
     Creates a backup of the Master dataset
     """
-    dytm = datetime.now().strftime("%Y%m%d_%H%M")
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
+    dytm = yesterday.strftime("%Y%m%d")
     source_file_path = 'master_dataset/cwd_master_dataset.xlsx'
     destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx'
     
@@ -328,14 +345,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
 
     # Fill NaN and NaT values
     df= df.fillna('')
-    '''
-    print (df.dtypes)
-    for column in df.columns:
-        try:
-            df[column] = df[column].fillna('')
-        except TypeError as e:
-            print(f"Error in column '{column}': {e}") 
-    '''
+
     # Create a spatial dataframe
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longcol], df[latcol]), crs="EPSG:4326")
 
@@ -343,6 +353,8 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     for col in gdf.columns:
         if pd.api.types.is_datetime64_any_dtype(gdf[col]):
             gdf[col] = gdf[col].apply(lambda x: x.isoformat() if not pd.isna(x) else '')
+    
+    gdf = gdf.replace(['nan', '<NA>'], '')
 
     def gdf_to_geojson(gdf):
         features = []
@@ -532,23 +544,23 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
-  
+    
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
-    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset.xlsx') #main dataset
+    save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
+    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_wHunter.xlsx') #lab + hunter data
 
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
     folder='2024_CWD'
     latcol='MAP_LATITUDE'
     longcol= 'MAP_LONGITUDE'
-    published_item = publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
+    published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
 
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
- 
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
