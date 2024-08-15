@@ -7,6 +7,7 @@ on:
 
 jobs:
   run-script:
+    if: github.repository == 'bcgov/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run
     runs-on: ubuntu-latest
     env:
       S3_ENDPOINT: ${{ secrets.S3_ENDPOINT}}
