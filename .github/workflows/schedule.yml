@@ -39,4 +39,4 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run the script
-      run: python cwd_data_workflow_withAGO.py
+      run: python cwd_data_workflow.py
