@@ -312,7 +312,7 @@ def backup_master_dataset(s3_client, bucket_name):
     pacific_timezone = pytz.timezone('America/Vancouver')
     yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
     dytm = yesterday.strftime("%Y%m%d")
-    source_file_path = 'master_dataset/cwd_master_dataset.xlsx'
+    source_file_path = 'master_dataset/cwd_master_dataset_sampling_wHunter.xlsx'
     destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx'
     
     try:
@@ -381,39 +381,46 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     # Convert GeoDataFrame to GeoJSON
     geojson_dict = gdf_to_geojson(gdf)
     geojson = json.dumps(geojson_dict)
-    geojson_file = BytesIO(json.dumps(geojson_dict).encode('utf-8'))
-
-    # Create a dictionary representing the GeoJSON item properties
-    geojson_item_properties = {
-        'title': title,
-        'type': 'GeoJson',
-        'tags': 'sampling points,geojson',
-        'description': 'CWD master dataset containing lab sampling and hunter information',
-        'fileName': 'data.geojson'
-    }
-
+   
     try:
-        # Search for existing items (including the GeoJSON file)
+        # Search for existing items (including the GeoJSON file and feature layer)
         existing_items = gis.content.search(f"(title:{title} OR title:data.geojson) AND owner:{gis.users.me.username}")
 
-        # Delete all existing items
+        # Delete the existing GeoJSON file
         for item in existing_items:
-            item.delete(force=True, permanent=True)
-            print(f"..existing item '{item.title}' permanently deleted.")
-        
-        # Wait for a short time to ensure deletion is processed
-        import time
-        time.sleep(10)
- 
-        # Create a new item
-        new_item = gis.content.add(item_properties=geojson_item_properties, data=geojson_file, folder=folder)
-        published_item = new_item.publish()
-        print(f"..new feature layer '{title}' published successfully.")
-        return published_item
+            if item.type == 'GeoJson':
+                item.delete(force=True, permanent=True)
+                print(f"..existing GeoJSON item '{item.title}' permanently deleted.")
+
+        # Find the existing feature layer
+        feature_layer_item = None
+        for item in existing_items:
+            if item.type == 'Feature Layer':
+                feature_layer_item = item
+                break
+
+        # Create a new GeoJSON item
+        geojson_item_properties = {
+            'title': title,
+            'type': 'GeoJson',
+            'tags': 'sampling points,geojson',
+            'description': 'CWD master dataset containing lab sampling and hunter information',
+            'fileName': 'data.geojson'
+        }
+        geojson_file = BytesIO(json.dumps(geojson_dict).encode('utf-8'))
+        new_geojson_item = gis.content.add(item_properties=geojson_item_properties, data=geojson_file, folder=folder)
+
+        # Update the existing feature layer or create a new one if it doesn't exist
+        if feature_layer_item:
+            feature_layer_item.update(data=new_geojson_item, folder=folder)
+            print(f"..existing feature layer '{title}' updated successfully.")
+        else:
+            published_item = new_geojson_item.publish(overwrite=True)
+            print(f"..new feature layer '{title}' published successfully.")
+            return published_item
 
     except Exception as e:
         error_message = f"..error publishing/updating feature layer: {str(e)}"
-        print(error_message)
         raise RuntimeError(error_message)
 
 
@@ -509,6 +516,7 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     response = feature_layer.manager.update_definition({
         "fields": fields
     })
+
 
 
 if __name__ == "__main__":
