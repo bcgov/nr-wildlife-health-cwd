@@ -235,8 +235,22 @@ def add_hunter_data_to_master(df, hunter_df):
     """
     Returns the final master df including hunter survey responses.
     """
+    logging.info("..manipulating columns")
     # convert CWD Ear Card from df to type string
     df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
+
+    cols = [
+    "HUNTER_MORTALITY_DATE",
+    "HUNTER_SPECIES",
+    "HUNTER_SEX",
+    "HUNTER_LATITUDE_DD",
+    "HUNTER_LONGITUDE_DD",
+    "HUNTER_ACCURACY_DISTANCE",
+    'HUNTER_CWD_EAR_CARD_ID_TEXT',
+    "HUNTER_CWD_EAR_CARD_ID",
+    "HUNTER_SUBMIT_DATE_TIME"
+    ]   
+    hunter_df =hunter_df[cols]
     
     logging.info("..merging dataframes")
     # merge the dataframes
@@ -245,12 +259,6 @@ def add_hunter_data_to_master(df, hunter_df):
                            how="left",
                            left_on="CWD_EAR_CARD_ID",
                            right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
-    
-    # drop unnecessary columns
-    logging.info("..dropping unnecessary columns")
-    columns_to_drop = ['OBJECTID', 'GlobalID', 'CreationDate', 'Editor','Creator', 'EditDate', 
-                       'bc_gov_header', 'disclaimer_text', 'email_message', 'SHAPE']
-    combined_df = combined_df.drop(columns_to_drop, axis=1)
     
     logging.info("..cleaning dataframes")
     # filter df for where hunters have updated data
@@ -274,6 +282,10 @@ def add_hunter_data_to_master(df, hunter_df):
 
     # re-combine dataframes
     df_wh = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
+
+    # Move columns to the last position
+    df_wh['MAP_SOURCE_DESCRIPTOR'] = df_wh.pop('MAP_SOURCE_DESCRIPTOR')
+    df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')
 
     return df_wh
 
@@ -532,7 +544,7 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
- 
+    
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
