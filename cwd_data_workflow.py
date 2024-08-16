@@ -312,8 +312,8 @@ def backup_master_dataset(s3_client, bucket_name):
     pacific_timezone = pytz.timezone('America/Vancouver')
     yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
     dytm = yesterday.strftime("%Y%m%d")
-    source_file_path = 'master_dataset/cwd_master_dataset_sampling_wHunter.xlsx'
-    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset.xlsx'
+    source_file_path = 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx'
+    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset_sampling_w_hunter.xlsx'
     
     try:
         s3_client.copy_object(
@@ -332,24 +332,29 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     """
     # Cleanup the master dataset before publishing
     df = df.dropna(subset=[latcol, longcol])
-    df=df.astype(str)
+    df = df.astype(str)
 
     # Drop personal info fields from the dataset
     drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID']
     df = df.drop(columns=[col for col in drop_cols if col in df.columns])
 
-    # Convert DATE fields to datetime and coerce errors to NaT
+    # Define Pacific timezone
+    pacific_timezone = pytz.timezone('America/Vancouver')
+
+    # Convert DATE fields to datetime, ensure they are timezone-aware
     for col in df.columns:
         if 'DATE' in col:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(pacific_timezone, 
+                                                                              ambiguous='NaT', 
+                                                                              nonexistent='shift_forward')
+    
     # Fill NaN and NaT values
-    df= df.fillna('')
+    df = df.fillna('')
 
     # Create a spatial dataframe
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longcol], df[latcol]), crs="EPSG:4326")
 
-    # Convert Timestamp columns to string format
+    # Convert Timestamp columns to string format with timezone info
     for col in gdf.columns:
         if pd.api.types.is_datetime64_any_dtype(gdf[col]):
             gdf[col] = gdf[col].apply(lambda x: x.isoformat() if not pd.isna(x) else '')
@@ -381,7 +386,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     # Convert GeoDataFrame to GeoJSON
     geojson_dict = gdf_to_geojson(gdf)
     geojson = json.dumps(geojson_dict)
-   
+
     try:
         # Search for existing items (including the GeoJSON file and feature layer)
         existing_items = gis.content.search(f"(title:{title} OR title:data.geojson) AND owner:{gis.users.me.username}")
@@ -557,7 +562,7 @@ if __name__ == "__main__":
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
-    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_wHunter.xlsx') #lab + hunter data
+    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
