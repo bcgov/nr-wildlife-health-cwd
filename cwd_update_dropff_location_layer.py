@@ -96,6 +96,8 @@ def get_dropoff_locations(s3_client, bucket_name):
     df_alias = pd.DataFrame({'Name': third_row, 'Alias': second_row})
     alias_dict = dict(zip(df_alias['Name'], df_alias['Alias']))
 
+    alias_dict["F24_7_ACCESS"] = alias_dict.pop("24/7_ACCESS")
+    
     return df, alias_dict
 
 
@@ -193,6 +195,35 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     except Exception as e:
         error_message = f"..error publishing/updating feature layer: {str(e)}"
         raise RuntimeError(error_message)
+    
+def apply_field_properties(gis, title, alias_dict):
+    """Applies Field aliases to the published Feature Layer"""
+    # Retrieve the published feature layer
+    feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
+    feature_layer = feature_layer_item.layers[0]   
+
+    # Fetch the current layer definition
+    layer_definition = feature_layer.properties
+
+    # Update the field aliases
+    for field in layer_definition['fields']:
+        field_name = field['name']
+        if field_name in alias_dict:
+            field['alias'] = alias_dict[field_name]
+
+    # Apply the updated definition to the feature layer
+    updated_definition = {
+        "fields": layer_definition['fields']
+    }
+
+    # Update the layer definition
+    update_response = feature_layer.manager.update_definition(updated_definition)
+
+    # Check and print the response
+    if 'success' in update_response and update_response['success']:
+        print("..field aliases updated successfully!")
+    else:
+        print("..failed to update field aliases. Response:", update_response)
 
 
 if __name__ == "__main__":
@@ -222,3 +253,12 @@ if __name__ == "__main__":
     latcol='Lat'
     longcol= 'Long'
     publish_feature_layer(gis, df, latcol, longcol, title, folder)
+
+    logging.info('\nApplying field aliases to the Feature Layer')
+    apply_field_properties(gis, title, alias_dict)
+
+    finish_t = timeit.default_timer() #finish time
+    t_sec = round(finish_t-start_t)
+    mins = int (t_sec/60)
+    secs = int (t_sec%60)
+    logging.info('\nProcessing Completed in {} minutes and {} seconds'.format (mins,secs)) 
