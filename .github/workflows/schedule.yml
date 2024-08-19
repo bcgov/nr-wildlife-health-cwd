@@ -1,13 +1,11 @@
-name: Run CWD Data Workflow Daily at 6am PST (1pm UTC)
-
+name: Run CWD scripts Daily at 6am PST (1pm UTC)
 on:
   schedule:
     - cron: '0 13 * * MON-FRI'
   workflow_dispatch:
-
 jobs:
-  run-script:
-    if: github.repository == 'bcgov/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run
+  run-scripts:
+    if: github.repository == 'bcgov/nr-wildlife-health-cwd' # This ensures that only the ORIGINAL bcgov repo workflow is run (not the forks!)
     runs-on: ubuntu-latest
     env:
       S3_ENDPOINT: ${{ secrets.S3_ENDPOINT}}
@@ -18,25 +16,22 @@ jobs:
       AGO_ACCOUNT_ID: ${{ secrets.AGO_ACCOUNT_ID}}
       AGO_USERNAME: ${{ secrets.AGO_USERNAME}}
       AGO_PASSWORD: ${{ secrets.AGO_PASSWORD}}
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.9'
-
     - name: Install libkrb5 for Kerberos on Linux
       run: |
         sudo apt install -y libkrb5-dev
         pip install requests-kerberos
-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-
-    - name: Run the script
+    - name: Run CWD Data Workflow
       run: python cwd_data_workflow.py
+    - name: Run Update Dropoff Locations Layer
+      run: python cwd_update_dropff_locations_layer.py
