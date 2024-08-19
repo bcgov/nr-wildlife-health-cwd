@@ -248,7 +248,7 @@ if __name__ == "__main__":
         df, alias_dict= get_dropoff_locations(s3_client, bucket_name='whcwdd')
 
     logging.info('\nPublishing Drop-off locations to AGO')
-    title='CWD_DropOff_Locations'
+    title='DropOff Locations'
     folder='2024_CWD'
     latcol='Lat'
     longcol= 'Long'
