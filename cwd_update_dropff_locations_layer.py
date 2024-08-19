@@ -1,8 +1,8 @@
 #-------------------------------------------------------------------------------
 # Name:        Update the CWD Drop-off location Feature Layer
 #
-# Purpose:     This script automates the update of the drop-off location  
-#              layer on ArcGis Online
+# Purpose:     This script updates the drop-off locations  
+#              feature layer on ArcGis Online.
 #              
 # Input(s):    (1) Object Storage credentials.
 #              (1) AGO credentials.           
