@@ -9,7 +9,7 @@
 #
 # Author:      Moez Labiadh - GeoBC 
 #
-# Created:     2024-08-16
+# Created:     2024-08-20
 # Updated:     
 #-------------------------------------------------------------------------------
 
@@ -29,6 +29,7 @@ from arcgis.gis import GIS
 import logging
 import timeit
 from datetime import datetime
+
 
 def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
     """
@@ -52,6 +53,7 @@ def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to connect to Object Storage: {e.response["Error"]["Message"]}')
         return None
+
 
 def get_dropoff_locations(s3_client, bucket_name):
     """
@@ -88,17 +90,20 @@ def get_dropoff_locations(s3_client, bucket_name):
     # Drop columns
     df = df.drop(columns=['PUBLIC_CONTACT_INFO_IND', 'NOTES', 'CONFIRMED'])
 
-    # Retrieve column aliases
-    df_tmp = pd.read_excel(excel_file, sheet_name='DropOff_Locations', header=None)
-    second_row = df_tmp.iloc[1]
-    third_row = df_tmp.iloc[2]
+    # Create a dict of field aliases and Lengths
+    fprop_dict= {
+            'REGION': {'Alias': 'Region', 'Length': 50},
+            'LOCATION_NAME': {'Alias': 'Location Name', 'Length': 120},
+            'CIVIC_ADDRESS': {'Alias': 'Civic Address', 'Length': 50},
+            'CITY': {'Alias': 'City', 'Length': 40},
+            'POSTAL_CODE': {'Alias': 'Postal Code', 'Length': 7},
+            'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 5},
+            'MORE_INFO': {'Alias': 'Details', 'Length': 200},
+            'CONTACT_NAME': {'Alias': 'Contact Name', 'Length': 50},
+            'CONTACT_INFO': {'Alias': 'Contact Information', 'Length': 40}
+        }
 
-    df_alias = pd.DataFrame({'Name': third_row, 'Alias': second_row})
-    alias_dict = dict(zip(df_alias['Name'], df_alias['Alias']))
-
-    alias_dict["F24_7_ACCESS"] = alias_dict.pop("24/7_ACCESS")
-    
-    return df, alias_dict
+    return df, fprop_dict
 
 
 def connect_to_AGO (HOST, USERNAME, PASSWORD):
@@ -114,7 +119,6 @@ def connect_to_AGO (HOST, USERNAME, PASSWORD):
         logging.error('..connection to AGOL failed.')
     
     return gis
-
 
 
 def publish_feature_layer(gis, df, latcol, longcol, title, folder):
@@ -196,34 +200,32 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         error_message = f"..error publishing/updating feature layer: {str(e)}"
         raise RuntimeError(error_message)
     
-def apply_field_properties(gis, title, alias_dict):
-    """Applies Field aliases to the published Feature Layer"""
+
+def apply_field_properties(gis, title, fprop_dict):
+    """Applies field properties (Alias and Length) to the published Feature Layer"""
     # Retrieve the published feature layer
     feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
     feature_layer = feature_layer_item.layers[0]   
 
-    # Fetch the current layer definition
-    layer_definition = feature_layer.properties
-
-    # Update the field aliases
-    for field in layer_definition['fields']:
+    # Apply Field Lengths and Aliases
+    fields = feature_layer.properties['fields']
+    # Update the fields based on the dictionary
+    for field in fields:
         field_name = field['name']
-        if field_name in alias_dict:
-            field['alias'] = alias_dict[field_name]
+        if field_name in fprop_dict:
+            field['length'] = fprop_dict[field_name]['Length']
+            field['alias'] = fprop_dict[field_name]['Alias']
 
-    # Apply the updated definition to the feature layer
-    updated_definition = {
-        "fields": layer_definition['fields']
-    }
-
-    # Update the layer definition
-    update_response = feature_layer.manager.update_definition(updated_definition)
+    # Update the field definitions
+    response = feature_layer.manager.update_definition({
+        "fields": fields
+    })
 
     # Check and print the response
-    if 'success' in update_response and update_response['success']:
+    if 'success' in response and response['success']:
         print("..field aliases updated successfully!")
     else:
-        print("..failed to update field aliases. Response:", update_response)
+        print("..failed to update field aliases. Response:", response)
 
 
 if __name__ == "__main__":
@@ -245,7 +247,7 @@ if __name__ == "__main__":
     
     if s3_client:
         logging.info('\nRetrieving drop-off locations from Object Storage')
-        df, alias_dict= get_dropoff_locations(s3_client, bucket_name='whcwdd')
+        df, fprop_dict= get_dropoff_locations(s3_client, bucket_name='whcwdd')
 
     logging.info('\nPublishing Drop-off locations to AGO')
     title='DropOff Locations'
@@ -254,11 +256,11 @@ if __name__ == "__main__":
     longcol= 'Long'
     publish_feature_layer(gis, df, latcol, longcol, title, folder)
 
-    logging.info('\nApplying field aliases to the Feature Layer')
-    apply_field_properties(gis, title, alias_dict)
+    logging.info('\nApplying field properties to the Feature Layer')
+    apply_field_properties(gis, title, fprop_dict)
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
     secs = int (t_sec%60)
-    logging.info('\nProcessing Completed in {} minutes and {} seconds'.format (mins,secs)) 
+    logging.info('\nProcessing Completed in {} minutes and {} seconds'.format (mins,secs))
