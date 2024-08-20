@@ -208,6 +208,10 @@ def process_master_dataset(df):
     pacific_timezone = pytz.timezone('America/Vancouver')
     current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
+
+    # Convert all columns containing 'DATE' in their names to datetime
+    date_columns = df.columns[df.columns.str.contains('DATE')]
+    df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
     
     return df
       
@@ -286,6 +290,10 @@ def add_hunter_data_to_master(df, hunter_df):
     # Move columns to the last position
     df_wh['MAP_SOURCE_DESCRIPTOR'] = df_wh.pop('MAP_SOURCE_DESCRIPTOR')
     df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')
+
+    # Convert all columns containing 'DATE' in their names to datetime
+    date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
+    df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
 
     return df_wh
 
@@ -521,8 +529,12 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     response = feature_layer.manager.update_definition({
         "fields": fields
     })
-
-
+    
+    # Check and print the response
+    if 'success' in response and response['success']:
+        print("..field properties updated successfully!")
+    else:
+        print("..failed to update field properties. Response:", response)
 
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
@@ -579,4 +591,4 @@ if __name__ == "__main__":
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
     secs = int (t_sec%60)
-    logging.info('\nProcessing Completed in {} minutes and {} seconds'.format (mins,secs)) 
+    logging.info('\nProcessing Completed in {} minutes and {} seconds'.format (mins,secs))
