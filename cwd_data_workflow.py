@@ -294,6 +294,8 @@ def add_hunter_data_to_master(df, hunter_df):
     # Convert all columns containing 'DATE' in their names to datetime
     date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
     df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
+    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
+    df_wh = df_wh.replace(['NaT'], '')
 
     return df_wh
 
