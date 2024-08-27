@@ -331,9 +331,82 @@ def backup_master_dataset(s3_client, bucket_name):
             CopySource={'Bucket': bucket_name, 'Key': source_file_path},
             Key=destination_file_path
         )
-        print(f"..old master dataset backed-up successfully")
+        logging.info(f"..old master dataset backed-up successfully")
     except Exception as e:
-        print(f"..an error occurred: {e}")
+        logging.info(f"..an error occurred: {e}")
+
+
+def save_spatial_files(df, s3_client, bucket_name):
+    """
+    Saves spatial files of the master datasets in object storage
+    """
+    latcol='MAP_LATITUDE'
+    loncol= 'MAP_LONGITUDE'
+
+    df = df.dropna(subset=[latcol, loncol])
+    df = df.astype(str)
+
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    dytm = datetime.now(pacific_timezone).strftime("%Y%m%d")
+    
+    # Create a GeoDataFrame from the DataFrame
+    gdf = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df[loncol], df[latcol]),
+        crs="EPSG:4326"
+    )
+    
+    #save the KML
+    try:
+        import fiona
+        fiona.supported_drivers['KML'] = 'rw'
+
+        # Convert GeoDataFrame to KML
+        kml_buffer = BytesIO()
+        gdf.to_file(kml_buffer, driver='KML')
+        kml_buffer.seek(0)
+
+        # Define the S3 object key
+        s3_kml_key = f"spatial/{dytm}_cwd_sampling_points.kml"
+        
+        # Upload the KML file to S3
+        s3_client.put_object(Bucket=bucket_name, Key=s3_kml_key, Body=kml_buffer, 
+                             ContentType='application/vnd.google-earth.kml+xml')
+        
+        logging.info(f"..KML file saved to {bucket_name}/{s3_kml_key}")
+        
+    except Exception as e:
+        logging.error(f"..failed to save or upload KML file: {e}")
+
+    #save the shapefile
+    try:
+        import zipfile
+        import tempfile
+
+        shapefile_buffer = BytesIO()
+        with zipfile.ZipFile(shapefile_buffer, 'w') as zf:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                shapefile_path = os.path.join(tmpdir, "{dytm}_cwd_sampling_points.shp")
+                gdf.to_file(shapefile_path, driver='ESRI Shapefile')
+
+                # Add all shapefile components to the zip archive
+                for filename in os.listdir(tmpdir):
+                    file_path = os.path.join(tmpdir, filename)
+                    zf.write(file_path, os.path.basename(file_path))
+
+        shapefile_buffer.seek(0)
+
+        # Define the S3 object key for Shapefile
+        s3_shapefile_key = f"spatial/{dytm}_cwd_sampling_points.zip"
+
+        # Upload the Shapefile (zipped) to S3
+        s3_client.put_object(Bucket=bucket_name, Key=s3_shapefile_key, Body=shapefile_buffer, 
+                             ContentType='application/zip')
+
+        logging.info(f"..shapefile saved to {bucket_name}/{s3_shapefile_key}")
+
+    except Exception as e:
+        logging.error(f"..failed to save or upload the shapefile: {e}")        
 
 
 def publish_feature_layer(gis, df, latcol, longcol, title, folder):
@@ -405,7 +478,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         for item in existing_items:
             if item.type == 'GeoJson':
                 item.delete(force=True, permanent=True)
-                print(f"..existing GeoJSON item '{item.title}' permanently deleted.")
+                logging.info(f"..existing GeoJSON item '{item.title}' permanently deleted.")
 
         # Find the existing feature layer
         feature_layer_item = None
@@ -428,10 +501,10 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         # Update the existing feature layer or create a new one if it doesn't exist
         if feature_layer_item:
             feature_layer_item.update(data=new_geojson_item, folder=folder)
-            print(f"..existing feature layer '{title}' updated successfully.")
+            logging.info(f"..existing feature layer '{title}' updated successfully.")
         else:
             published_item = new_geojson_item.publish(overwrite=True)
-            print(f"..new feature layer '{title}' published successfully.")
+            logging.info(f"..new feature layer '{title}' published successfully.")
             return published_item
 
     except Exception as e:
@@ -534,9 +607,9 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     
     # Check and print the response
     if 'success' in response and response['success']:
-        print("..field properties updated successfully!")
+        logging.info("..field properties updated successfully!")
     else:
-        print("..failed to update field properties. Response:", response)
+        logging.info("..failed to update field properties. Response:", response)
 
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
@@ -571,12 +644,15 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
-    
+
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
+
+    #logging.info('\nSaving spatial data')
+    #save_spatial_files(df_wh, s3_client, bucket_name)
 
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
