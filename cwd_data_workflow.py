@@ -249,7 +249,6 @@ def add_hunter_data_to_master(df, hunter_df):
     "HUNTER_SEX",
     "HUNTER_LATITUDE_DD",
     "HUNTER_LONGITUDE_DD",
-    "HUNTER_ACCURACY_DISTANCE",
     'HUNTER_CWD_EAR_CARD_ID_TEXT',
     "HUNTER_CWD_EAR_CARD_ID",
     "HUNTER_SUBMIT_DATE_TIME"
