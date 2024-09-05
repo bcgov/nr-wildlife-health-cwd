@@ -88,7 +88,7 @@ def get_dropoff_locations(s3_client, bucket_name):
     df.loc[df['PUBLIC_CONTACT_INFO_IND'] == 'No', ['CONTACT_NAME', 'CONTACT_INFO']] = None
 
     # Drop columns
-    df = df.drop(columns=['PUBLIC_CONTACT_INFO_IND', 'NOTES', 'CONFIRMED'])
+    df = df.drop(columns=['PUBLIC_CONTACT_INFO_IND', 'NOTES', 'CONFIRMED', 'ON_WEBSITE'])
 
     # Create a dict of field aliases and Lengths
     fprop_dict= {
