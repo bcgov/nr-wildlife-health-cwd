@@ -97,6 +97,8 @@ def get_dropoff_locations(s3_client, bucket_name):
             'CIVIC_ADDRESS': {'Alias': 'Civic Address', 'Length': 50},
             'CITY': {'Alias': 'City', 'Length': 40},
             'POSTAL_CODE': {'Alias': 'Postal Code', 'Length': 7},
+            'Lat': {'Alias': 'Latitude'},
+            'Long': {'Alias': 'Longitude'},
             'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 5},
             'MORE_INFO': {'Alias': 'Details', 'Length': 200},
             'CONTACT_NAME': {'Alias': 'Contact Name', 'Length': 50},
@@ -180,8 +182,6 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         geojson_item_properties = {
             'title': title,
             'type': 'GeoJson',
-            'tags': 'cwd, drop-off locations, freezers',
-            'description': 'Drop-off /freezer locations for CWD project.',
             'fileName': 'freezer.geojson'
         }
         geojson_file = BytesIO(json.dumps(geojson_dict).encode('utf-8'))
@@ -250,7 +250,7 @@ if __name__ == "__main__":
         df, fprop_dict= get_dropoff_locations(s3_client, bucket_name='whcwdd')
 
     logging.info('\nPublishing Drop-off locations to AGO')
-    title='DropOff Locations'
+    title='Animal Specimen Drop-off Locations for Chronic Wasting Disease Testing - Points'
     folder='2024_CWD'
     latcol='Lat'
     longcol= 'Long'
