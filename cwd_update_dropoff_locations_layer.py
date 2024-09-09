@@ -132,7 +132,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longcol], df[latcol]), crs="EPSG:4326")
 
     gdf = gdf.replace(['NaN', np.nan], '')
-    gdf = gdf.drop(columns=['Lat', 'Long'])
+    #gdf = gdf.drop(columns=['Lat', 'Long'])
 
     def gdf_to_geojson(gdf):
         features = []
