@@ -97,8 +97,8 @@ def get_dropoff_locations(s3_client, bucket_name):
             'CIVIC_ADDRESS': {'Alias': 'Civic Address', 'Length': 50},
             'CITY': {'Alias': 'City', 'Length': 40},
             'POSTAL_CODE': {'Alias': 'Postal Code', 'Length': 7},
-            'Lat': {'Alias': 'Latitude'},
-            'Long': {'Alias': 'Longitude'},
+            'Lat': {'Alias': 'Latitude', 'Length': 10},
+            'Long': {'Alias': 'Longitude', 'Length': 10},
             'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 5},
             'MORE_INFO': {'Alias': 'Details', 'Length': 200},
             'CONTACT_NAME': {'Alias': 'Contact Name', 'Length': 50},
@@ -134,7 +134,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longcol], df[latcol]), crs="EPSG:4326")
 
     gdf = gdf.replace(['NaN', np.nan], '')
-    gdf = gdf.drop(columns=['Lat', 'Long'])
+    #gdf = gdf.drop(columns=['Lat', 'Long'])
 
     def gdf_to_geojson(gdf):
         features = []
