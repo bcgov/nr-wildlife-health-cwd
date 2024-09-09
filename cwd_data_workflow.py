@@ -513,7 +513,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
 
 def retrieve_field_properties (s3_client, bucket_name):
     """
-    Constructs a dictionnaries containing field properties (domains, length and value type)
+    Constructs a dictionnaries containing field properties.
     """
     prefix= 'incoming_from_idir/data_dictionary/'
 
@@ -549,7 +549,7 @@ def retrieve_field_properties (s3_client, bucket_name):
         domains_dict[field_name] = domain_values
 
     #Creating field length and type dictionnary
-    df_fprop= df_datadict[['GIS_FIELD_NAME', 'Type', 'Length']]
+    df_fprop= df_datadict[['GIS_FIELD_NAME', 'Type', 'Length', 'Alias']]
     df_fprop = df_fprop.replace(["n/a", "N/A", ""], None)
     df_fprop['Length'] = df_fprop['Length'].fillna(25)
     df_fprop['Length'] = df_fprop['Length'].astype(int)
@@ -572,7 +572,7 @@ def retrieve_field_properties (s3_client, bucket_name):
 
 
 def apply_field_properties(gis, title, domains_dict, fprop_dict):
-    """Applies Domains, Field Lengths and Field Types to the published Feature Layer"""
+    """Applies Field proprities to the published Feature Layer"""
     # Retrieve the published feature layer
     feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
     feature_layer = feature_layer_item.layers[0]
@@ -598,6 +598,7 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
         if field_name in fprop_dict:
             field['length'] = fprop_dict[field_name]['Length']
             field['type'] = fprop_dict[field_name]['Type']
+            field['alias'] = fprop_dict[field_name]['Alias']
 
     # Update the field definitions
     response = feature_layer.manager.update_definition({
@@ -609,6 +610,7 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
         logging.info("..field properties updated successfully!")
     else:
         logging.info("..failed to update field properties. Response:", response)
+
 
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
