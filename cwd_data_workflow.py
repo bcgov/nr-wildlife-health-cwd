@@ -29,7 +29,7 @@ import json
 import pandas as pd
 import geopandas as gpd
 import numpy as np
-from io import BytesIO
+from io import BytesIO, StringIO
 from arcgis.gis import GIS
 
 import logging
@@ -331,6 +331,55 @@ def backup_master_dataset(s3_client, bucket_name):
             Key=destination_file_path
         )
         logging.info(f"..old master dataset backed-up successfully")
+    except Exception as e:
+        logging.info(f"..an error occurred: {e}")
+
+def save_web_csv (df_wh, s3_client, bucket_name, file_key):
+    """
+    Saves a csv containing information for the CWD webpage.
+    """
+    #filter rows to include in the webpage
+    df_wb = df_wh[
+        (df_wh['CWD_SAMPLED_IND'] == 'Yes') & 
+        (df_wh['MORTALITY_DATE'] >= pd.Timestamp('2024-08-01')) & 
+        (~df_wh['CWD_TEST_STATUS'].isin(['Non-negative', 'Positive']))
+    ]
+
+    #filter columns to include in the webpage
+    df_wb= df_wb[['DROPOFF_LOCATION',
+                  'CWD_EAR_CARD_ID',
+                  'SPECIES',
+                  'SEX',
+                  'WMU',
+                  'MORTALITY_DATE',
+                  'SAMPLED_DATE',
+                  'CWD_TEST_STATUS']]  
+    
+    #rename the columns
+    df_wb = df_wb.rename(columns={
+        'DROPOFF_LOCATION': 'Drop-off Location',
+        'CWD_EAR_CARD_ID': 'CWD Ear Card',
+        'SPECIES': 'Species',
+        'SEX': 'Sex',
+        'WMU': 'MU',
+        'MORTALITY_DATE': 'Mortality Date',
+        'SAMPLED_DATE': 'Sampled Date',
+        'CWD_TEST_STATUS': 'CWD Status'
+    })
+
+    #convert to csv
+    csv_buffer = StringIO()
+    df_wb.to_csv(csv_buffer, index=False)
+
+    # upload the csv  to S3
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name, 
+            Key=file_key, 
+            Body=csv_buffer.getvalue(),
+            ContentType='text/csv'
+        )
+        logging.info(f'..public csv successfully saved to bucket {bucket_name}')
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
@@ -646,6 +695,11 @@ if __name__ == "__main__":
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
 
+    logging.info('\nSaving a CSV for the webpage')
+    bucket_name= 'whcwddbcbox'
+    file_key= 'export_results_to_public_web/cwd_samping_results_public.csv'
+    save_web_csv (df_wh, s3_client, bucket_name, file_key)
+
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
@@ -665,7 +719,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-
+  
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
