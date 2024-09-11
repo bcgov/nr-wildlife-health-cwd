@@ -330,7 +330,7 @@ def backup_master_dataset(s3_client, bucket_name):
             CopySource={'Bucket': bucket_name, 'Key': source_file_path},
             Key=destination_file_path
         )
-        logging.info(f"..old master dataset backed-up successfully")
+        logging.info("..old master dataset backed-up successfully")
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
@@ -739,12 +739,12 @@ if __name__ == "__main__":
 
     logging.info('\nSaving a CSV for the webpage')
     bucket_name= 'whcwddbcbox'
-    file_key= 'export_results_to_public_web/cwd_samping_results_public.csv'
+    file_key= 'export_results_to_public_web/cwd_sampling_results_public.csv'
     save_web_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving a CSV for lab testing')
     bucket_name= 'whcwddbcbox'
-    file_key= 'export_to_lab/cwd_samping_lab_submission.csv'
+    file_key= 'export_to_lab/cwd_sampling_lab_submission.csv'
     save_lab_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving the Master Dataset')
