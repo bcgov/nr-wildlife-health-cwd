@@ -384,6 +384,48 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
         logging.info(f"..an error occurred: {e}")
 
 
+def save_lab_csv (df_wh, s3_client, bucket_name, file_key):
+    """
+    Saves a csv containing information for lab submission.
+    """
+    #filter rows to include in the lab submission
+    df_lb = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+
+    #filter columns to include in the webpage
+    df_lb= df_wh[['CWD_LAB_SUBMISSION_ID',
+                  'WLH_ID',
+                  'CWD_EAR_CARD_ID',
+                  'SPECIES',
+                  'SAMPLED_DATE',
+                  'SAMPLE_CONDITION',
+                  'SAMPLE_CWD_TONSIL_NUM',
+                  'SAMPLE_CWD_RPLN_NUM',
+                  'SAMPLE_CWD_OBEX_IND',
+                  'SAMPLE_DATE_SENT_TO_LAB',
+                  'REPORTING_LAB',
+                  'REPORTING_LAB_DATE_RECEIVED',
+                  'REPORTING_LAB_ID',
+                  'REPORTING_LAB_COMMENT',
+                  'CWD_TEST_STATUS',
+                  'CWD_TEST_STATUS_DATE']]  
+    
+    #convert to csv
+    csv_buffer = StringIO()
+    df_lb.to_csv(csv_buffer, index=False)
+
+    # upload the csv  to S3
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name, 
+            Key=file_key, 
+            Body=csv_buffer.getvalue(),
+            ContentType='text/csv'
+        )
+        logging.info(f'..lab csv successfully saved to bucket {bucket_name}')
+    except Exception as e:
+        logging.info(f"..an error occurred: {e}")
+
+
 def save_spatial_files(df, s3_client, bucket_name):
     """
     Saves spatial files of the master datasets in object storage
@@ -700,6 +742,11 @@ if __name__ == "__main__":
     file_key= 'export_results_to_public_web/cwd_samping_results_public.csv'
     save_web_csv (df_wh, s3_client, bucket_name, file_key)
 
+    logging.info('\nSaving a CSV for lab testing')
+    bucket_name= 'whcwddbcbox'
+    file_key= 'export_to_lab/cwd_samping_lab_submission.csv'
+    save_lab_csv (df_wh, s3_client, bucket_name, file_key)
+
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
@@ -719,7 +766,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-  
+
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
