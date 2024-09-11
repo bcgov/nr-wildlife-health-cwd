@@ -29,7 +29,7 @@ import json
 import pandas as pd
 import geopandas as gpd
 import numpy as np
-from io import BytesIO
+from io import BytesIO, StringIO
 from arcgis.gis import GIS
 
 import logging
@@ -330,7 +330,98 @@ def backup_master_dataset(s3_client, bucket_name):
             CopySource={'Bucket': bucket_name, 'Key': source_file_path},
             Key=destination_file_path
         )
-        logging.info(f"..old master dataset backed-up successfully")
+        logging.info("..old master dataset backed-up successfully")
+    except Exception as e:
+        logging.info(f"..an error occurred: {e}")
+
+def save_web_csv (df_wh, s3_client, bucket_name, file_key):
+    """
+    Saves a csv containing information for the CWD webpage.
+    """
+    #filter rows to include in the webpage
+    df_wb = df_wh[
+        (df_wh['CWD_SAMPLED_IND'] == 'Yes') & 
+        (df_wh['MORTALITY_DATE'] >= pd.Timestamp('2024-08-01')) & 
+        (~df_wh['CWD_TEST_STATUS'].isin(['Non-negative', 'Positive']))
+    ]
+
+    #filter columns to include in the webpage
+    df_wb= df_wb[['DROPOFF_LOCATION',
+                  'CWD_EAR_CARD_ID',
+                  'SPECIES',
+                  'SEX',
+                  'WMU',
+                  'MORTALITY_DATE',
+                  'SAMPLED_DATE',
+                  'CWD_TEST_STATUS']]  
+    
+    #rename the columns
+    df_wb = df_wb.rename(columns={
+        'DROPOFF_LOCATION': 'Drop-off Location',
+        'CWD_EAR_CARD_ID': 'CWD Ear Card',
+        'SPECIES': 'Species',
+        'SEX': 'Sex',
+        'WMU': 'MU',
+        'MORTALITY_DATE': 'Mortality Date',
+        'SAMPLED_DATE': 'Sampled Date',
+        'CWD_TEST_STATUS': 'CWD Status'
+    })
+
+    #convert to csv
+    csv_buffer = StringIO()
+    df_wb.to_csv(csv_buffer, index=False)
+
+    # upload the csv  to S3
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name, 
+            Key=file_key, 
+            Body=csv_buffer.getvalue(),
+            ContentType='text/csv'
+        )
+        logging.info(f'..public csv successfully saved to bucket {bucket_name}')
+    except Exception as e:
+        logging.info(f"..an error occurred: {e}")
+
+
+def save_lab_csv (df_wh, s3_client, bucket_name, file_key):
+    """
+    Saves a csv containing information for lab submission.
+    """
+    #filter rows to include in the lab submission
+    df_lb = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+
+    #filter columns to include in the webpage
+    df_lb= df_wh[['CWD_LAB_SUBMISSION_ID',
+                  'WLH_ID',
+                  'CWD_EAR_CARD_ID',
+                  'SPECIES',
+                  'SAMPLED_DATE',
+                  'SAMPLE_CONDITION',
+                  'SAMPLE_CWD_TONSIL_NUM',
+                  'SAMPLE_CWD_RPLN_NUM',
+                  'SAMPLE_CWD_OBEX_IND',
+                  'SAMPLE_DATE_SENT_TO_LAB',
+                  'REPORTING_LAB',
+                  'REPORTING_LAB_DATE_RECEIVED',
+                  'REPORTING_LAB_ID',
+                  'REPORTING_LAB_COMMENT',
+                  'CWD_TEST_STATUS',
+                  'CWD_TEST_STATUS_DATE']]  
+    
+    #convert to csv
+    csv_buffer = StringIO()
+    df_lb.to_csv(csv_buffer, index=False)
+
+    # upload the csv  to S3
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name, 
+            Key=file_key, 
+            Body=csv_buffer.getvalue(),
+            ContentType='text/csv'
+        )
+        logging.info(f'..lab csv successfully saved to bucket {bucket_name}')
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
@@ -645,6 +736,16 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
+
+    logging.info('\nSaving a CSV for the webpage')
+    bucket_name= 'whcwddbcbox'
+    file_key= 'export_results_to_public_web/cwd_sampling_results_public.csv'
+    save_web_csv (df_wh, s3_client, bucket_name, file_key)
+
+    logging.info('\nSaving a CSV for lab testing')
+    bucket_name= 'whcwddbcbox'
+    file_key= 'export_to_lab/cwd_sampling_lab_submission.csv'
+    save_lab_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
