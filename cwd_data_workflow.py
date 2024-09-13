@@ -389,10 +389,11 @@ def save_lab_csv (df_wh, s3_client, bucket_name, file_key):
     Saves a csv containing information for lab submission.
     """
     #filter rows to include in the lab submission
-    df_lb = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+    df_lb = df_wh[df_wh['CWD_SAMPLED_IND'] == 'Yes']
 
     #filter columns to include in the webpage
-    df_lb= df_wh[['CWD_LAB_SUBMISSION_ID',
+    df_lb= df_lb[['CWD_SAMPLED_IND',
+                  'CWD_LAB_SUBMISSION_ID',
                   'WLH_ID',
                   'CWD_EAR_CARD_ID',
                   'SPECIES',
@@ -407,7 +408,8 @@ def save_lab_csv (df_wh, s3_client, bucket_name, file_key):
                   'REPORTING_LAB_ID',
                   'REPORTING_LAB_COMMENT',
                   'CWD_TEST_STATUS',
-                  'CWD_TEST_STATUS_DATE']]  
+                  'CWD_TEST_STATUS_DATE',
+                  'GIS_LOAD_VERSION_DATE']]  
     
     #convert to csv
     csv_buffer = StringIO()
