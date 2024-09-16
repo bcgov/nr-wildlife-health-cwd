@@ -353,7 +353,8 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
                   'WMU',
                   'MORTALITY_DATE',
                   'SAMPLED_DATE',
-                  'CWD_TEST_STATUS']]  
+                  'CWD_TEST_STATUS',
+                  'GIS_LOAD_VERSION_DATE']]  
     
     #rename the columns
     df_wb = df_wb.rename(columns={
