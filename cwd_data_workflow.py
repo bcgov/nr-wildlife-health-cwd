@@ -777,13 +777,17 @@ if __name__ == "__main__":
     df_wh= add_hunter_data_to_master(df, hunter_df)
 
     logging.info('\nSaving a CSV for the webpage')
-    bucket_name= 'whcwddbcbox'
-    file_key= 'Web/cwd_sampling_results_public.csv'
+    #bucket_name= 'whcwddbcbox' # this points to BCBOX
+    #file_key= 'Web/cwd_sampling_results_public.csv' # this points to BCBOX
+    bucket_name= 'whcwdd' # this points to BGeoDrive
+    file_key= 'share_web/cwd_sampling_results_public.csv' # this points to GeoDrive
     save_web_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving a CSV for lab testing')
-    bucket_name= 'whcwddbcbox'
-    folder= 'Lab/to_Lab/'
+    #bucket_name= 'whcwddbcbox' # this points to BCBOX
+    #folder= 'Lab/to_Lab/' # this points to BCBOX
+    bucket_name= 'whcwdd' # this points to GeoDrive
+    folder= 'for_labs/for_lab/' # this points to GeoDrive
     save_lab_csv (df_wh, s3_client, bucket_name, folder)
 
     logging.info('\nSaving the Master Dataset')
@@ -805,7 +809,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-
+ 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
