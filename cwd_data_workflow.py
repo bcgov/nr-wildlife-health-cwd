@@ -365,7 +365,6 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
             df_wb[col] = pd.to_datetime(df[col]).dt.date
 
     #fill blank values with 'Not Recorded'
-    #df_wb['WMU'] = df_wb['WMU'].astype(str)
     df_wb = df_wb.fillna('Not recorded')
     df_wb = df_wb.replace('', 'Not recorded')
 
@@ -398,48 +397,72 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
         logging.info(f"..an error occurred: {e}")
 
 
-def save_lab_csv (df_wh, s3_client, bucket_name, file_key):
+def save_lab_csv (df_wh, s3_client, bucket_name, folder):
     """
-    Saves a csv containing information for lab submission.
+    Saves multiple CSVs, each containing information for a specific lab submission.
     """
-    #filter rows to include in the lab submission
-    df_lb = df_wh[df_wh['CWD_SAMPLED_IND'] == 'Yes']
-
-    #filter columns to include in the webpage
-    df_lb= df_lb[['CWD_SAMPLED_IND',
-                  'CWD_LAB_SUBMISSION_ID',
-                  'WLH_ID',
-                  'CWD_EAR_CARD_ID',
-                  'SPECIES',
-                  'SAMPLED_DATE',
-                  'SAMPLE_CONDITION',
-                  'SAMPLE_CWD_TONSIL_NUM',
-                  'SAMPLE_CWD_RPLN_NUM',
-                  'SAMPLE_CWD_OBEX_IND',
-                  'SAMPLE_DATE_SENT_TO_LAB',
-                  'REPORTING_LAB',
-                  'REPORTING_LAB_DATE_RECEIVED',
-                  'REPORTING_LAB_ID',
-                  'REPORTING_LAB_COMMENT',
-                  'CWD_TEST_STATUS',
-                  'CWD_TEST_STATUS_DATE',
-                  'GIS_LOAD_VERSION_DATE']]  
-    
-    #convert to csv
-    csv_buffer = StringIO()
-    df_lb.to_csv(csv_buffer, index=False)
-
-    # upload the csv  to S3
+    # delete existing CSV files in the to_Lab folder
     try:
-        s3_client.put_object(
-            Bucket=bucket_name, 
-            Key=file_key, 
-            Body=csv_buffer.getvalue(),
-            ContentType='text/csv'
-        )
-        logging.info(f'..lab csv successfully saved to bucket {bucket_name}')
+        # collect CSV file keys to delete
+        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
+        if 'Contents' in response:
+            csv_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.csv')]
+            #delete the files if there are any CSVs to remove
+            if csv_keys:
+                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': csv_keys})
+                logging.info(f"..deleted existing CSV files in folder: {folder}")
+            else:
+                logging.info("..no existing CSV files found in the folder.")
+        else:
+            logging.info("..no files found in the folder.")
     except Exception as e:
-        logging.info(f"..an error occurred: {e}")
+        logging.error(f"..an error occurred while deleting existing CSV files: {e}")
+
+    # Filter rows to include in the lab submission
+    df_lb = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes') &
+                  (df_wh['CWD_TEST_STATUS'] == 'Pending') &
+                  (df_wh['REPORTING_LAB_DATE_RECEIVED'].isnull()) &
+                  (df_wh['REPORTING_LAB_ID'].isnull())
+    ]
+
+    # Filter columns to include in the CSV
+    df_lb = df_lb[['CWD_SAMPLED_IND',
+                   'CWD_LAB_SUBMISSION_ID',
+                   'WLH_ID',
+                   'CWD_EAR_CARD_ID',
+                   'SPECIES',
+                   'SAMPLED_DATE',
+                   'SAMPLE_CONDITION',
+                   'SAMPLE_CWD_TONSIL_NUM',
+                   'SAMPLE_CWD_RPLN_NUM',
+                   'SAMPLE_CWD_OBEX_IND',
+                   'SAMPLE_DATE_SENT_TO_LAB',
+                   'REPORTING_LAB',
+                   'REPORTING_LAB_DATE_RECEIVED',
+                   'REPORTING_LAB_ID',
+                   'REPORTING_LAB_COMMENT',
+                   'CWD_TEST_STATUS',
+                   'CWD_TEST_STATUS_DATE',
+                   'GIS_LOAD_VERSION_DATE']]
+
+    #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate CSV for each
+    for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
+        file_key = f"{folder}{submission_id}_cwd_sampling_lab_submission.csv"
+        # Convert the group DataFrame to CSV
+        csv_buffer = StringIO()
+        group_df.to_csv(csv_buffer, index=False)
+
+        # Upload the CSV to S3
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=file_key,
+                Body=csv_buffer.getvalue(),
+                ContentType='text/csv'
+            )
+            logging.info(f'..CSV for submission {submission_id} successfully saved to {file_key}')
+        except Exception as e:
+            logging.error(f"..an error occurred while saving {file_key}: {e}")
 
 
 def save_spatial_files(df, s3_client, bucket_name):
@@ -755,13 +778,13 @@ if __name__ == "__main__":
 
     logging.info('\nSaving a CSV for the webpage')
     bucket_name= 'whcwddbcbox'
-    file_key= 'export_results_to_public_web/cwd_sampling_results_public.csv'
+    file_key= 'Web/cwd_sampling_results_public.csv'
     save_web_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving a CSV for lab testing')
     bucket_name= 'whcwddbcbox'
-    file_key= 'export_to_lab/cwd_sampling_lab_submission.csv'
-    save_lab_csv (df_wh, s3_client, bucket_name, file_key)
+    folder= 'Lab/to_Lab/'
+    save_lab_csv (df_wh, s3_client, bucket_name, folder)
 
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
@@ -782,7 +805,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
- 
+
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
