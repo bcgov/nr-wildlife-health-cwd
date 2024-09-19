@@ -335,15 +335,17 @@ def backup_master_dataset(s3_client, bucket_name):
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
+
 def save_web_csv (df_wh, s3_client, bucket_name, file_key):
     """
     Saves a csv containing information for the CWD webpage.
     """
     #filter rows to include in the webpage
+    incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested']
     df_wb = df_wh[
         (df_wh['CWD_SAMPLED_IND'] == 'Yes') & 
-        (df_wh['MORTALITY_DATE'] >= pd.Timestamp('2024-08-01')) & 
-        (~df_wh['CWD_TEST_STATUS'].isin(['Non-negative', 'Positive']))
+        (df_wh['SAMPLED_DATE'] >= pd.Timestamp('2024-08-01')) & 
+        (df_wh['CWD_TEST_STATUS'].isin(incld_sts))
     ]
 
     #filter columns to include in the webpage
@@ -357,6 +359,16 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
                   'CWD_TEST_STATUS',
                   'GIS_LOAD_VERSION_DATE']]  
     
+    #convert the 'DATE' columns to only show the date part
+    for col in df_wb.columns:
+        if 'DATE' in col:
+            df_wb[col] = pd.to_datetime(df[col]).dt.date
+
+    #fill blank values with 'Not Recorded'
+    #df_wb['WMU'] = df_wb['WMU'].astype(str)
+    df_wb = df_wb.fillna('Not recorded')
+    df_wb = df_wb.replace('', 'Not recorded')
+
     #rename the columns
     df_wb = df_wb.rename(columns={
         'DROPOFF_LOCATION': 'Drop-off Location',
@@ -373,7 +385,7 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
     csv_buffer = StringIO()
     df_wb.to_csv(csv_buffer, index=False)
 
-    # upload the csv  to S3
+    #upload the csv  to S3
     try:
         s3_client.put_object(
             Bucket=bucket_name, 
@@ -770,7 +782,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-
+ 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
