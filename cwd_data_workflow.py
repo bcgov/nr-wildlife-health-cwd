@@ -360,9 +360,9 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
                   'GIS_LOAD_VERSION_DATE']]  
     
     #convert the 'DATE' columns to only show the date part
-    for col in df_wb.columns:
-        if 'DATE' in col:
-            df_wb[col] = pd.to_datetime(df[col]).dt.date
+    for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
+        #if 'DATE' in col:
+        df_wb[col] = pd.to_datetime(df[col]).dt.date
 
     #fill blank values with 'Not Recorded'
     df_wb = df_wb.fillna('Not recorded')
@@ -447,7 +447,8 @@ def save_lab_csv (df_wh, s3_client, bucket_name, folder):
 
     #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate CSV for each
     for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
-        file_key = f"{folder}{submission_id}_cwd_sampling_lab_submission.csv"
+        submission_id_lowr = submission_id.lower()
+        file_key = f"{folder}cwd_sampling_lab_submission_{submission_id_lowr}.csv"
         # Convert the group DataFrame to CSV
         csv_buffer = StringIO()
         group_df.to_csv(csv_buffer, index=False)
@@ -759,6 +760,7 @@ if __name__ == "__main__":
     AGO_PASSWORD = os.getenv('AGO_PASSWORD')
     gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
     
+    #'''
     if s3_client:
         logging.info('\nRetrieving Incoming Data from Object Storage')
         df = get_incoming_data_from_os(s3_client)
@@ -775,19 +777,24 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
+    #'''
 
     logging.info('\nSaving a CSV for the webpage')
-    #bucket_name= 'whcwddbcbox' # this points to BCBOX
-    #file_key= 'Web/cwd_sampling_results_public.csv' # this points to BCBOX
+    bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
+    file_key_bbx= 'Web/cwd_sampling_results_public.csv' # this points to BCBOX
+    save_web_csv (df_wh, s3_client, bucket_name_bbx, file_key_bbx)
+
     bucket_name= 'whcwdd' # this points to BGeoDrive
     file_key= 'share_web/cwd_sampling_results_public.csv' # this points to GeoDrive
     save_web_csv (df_wh, s3_client, bucket_name, file_key)
 
     logging.info('\nSaving a CSV for lab testing')
-    #bucket_name= 'whcwddbcbox' # this points to BCBOX
-    #folder= 'Lab/to_Lab/' # this points to BCBOX
+    bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
+    folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
+    save_lab_csv (df_wh, s3_client, bucket_name_bbx, folder_bbx)
+
     bucket_name= 'whcwdd' # this points to GeoDrive
-    folder= 'for_labs/for_lab/' # this points to GeoDrive
+    folder= 'share_labs/for_lab/' # this points to GeoDrive
     save_lab_csv (df_wh, s3_client, bucket_name, folder)
 
     logging.info('\nSaving the Master Dataset')
@@ -799,6 +806,7 @@ if __name__ == "__main__":
     #logging.info('\nSaving spatial data')
     #save_spatial_files(df_wh, s3_client, bucket_name)
 
+
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
     folder='2024_CWD'
@@ -809,7 +817,8 @@ if __name__ == "__main__":
     logging.info('\nApplying field proprities to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
- 
+    
+
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
