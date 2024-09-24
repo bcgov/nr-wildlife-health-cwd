@@ -100,7 +100,7 @@ def get_dropoff_locations(s3_client, bucket_name):
             'Lat': {'Alias': 'Latitude', 'Length': 10},
             'Long': {'Alias': 'Longitude', 'Length': 10},
             'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 5},
-            'MORE_INFO': {'Alias': 'Details', 'Length': 200},
+            'MORE_INFO': {'Alias': 'Details', 'Length': 400},
             'CONTACT_NAME': {'Alias': 'Contact Name', 'Length': 50},
             'CONTACT_INFO': {'Alias': 'Contact Information', 'Length': 40}
         }
