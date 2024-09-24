@@ -1,7 +1,7 @@
-name: Run CWD scripts Daily at 6am PST (1pm UTC)
+name: Run CWD scripts Daily at 4am PST (11pm UTC)
 on:
   schedule:
-    - cron: '0 13 * * MON-FRI'
+    - cron: '0 11 * * MON-FRI'
   workflow_dispatch:
 jobs:
   run-scripts:
