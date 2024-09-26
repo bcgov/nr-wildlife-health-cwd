@@ -13,7 +13,7 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #              Emma Armitage - GeoBC
-#              Sasha Lees - GeoBC 
+#              Sasha Lees - GeoBC
 #
 # Created:     2024-08-15
 # Updated:     
