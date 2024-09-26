@@ -241,8 +241,8 @@ def add_hunter_data_to_master(df, hunter_df):
     Returns the final master df including hunter survey responses.
     """
     logging.info("..manipulating columns")
-    # convert CWD Ear Card from df to type string
-    df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].astype('string')
+    # convert CWD Ear Card values from df to  integer
+    df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else None)
 
     cols = [
     "HUNTER_MORTALITY_DATE",
@@ -777,7 +777,6 @@ if __name__ == "__main__":
 
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
-    #'''
 
     logging.info('\nSaving a CSV for the webpage')
     bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
@@ -818,7 +817,6 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
-
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
