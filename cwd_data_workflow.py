@@ -13,7 +13,7 @@
 #
 # Author:      Moez Labiadh - GeoBC
 #              Emma Armitage - GeoBC
-#              Sasha Lees - GeoBC 
+#              Sasha Lees - GeoBC
 #
 # Created:     2024-08-15
 # Updated:     
@@ -242,8 +242,9 @@ def add_hunter_data_to_master(df, hunter_df):
     """
     logging.info("..manipulating columns")
     # convert CWD Ear Card values from df to  integer
-    df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else None)
-
+    #df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else None)
+    df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) and x != 'None' else None)
+ 
     cols = [
     "HUNTER_MORTALITY_DATE",
     "HUNTER_SPECIES",
@@ -308,6 +309,8 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
     df.to_excel(xlsx_buffer, index=False)
     xlsx_buffer.seek(0)
 
+    #logging.info(f'..Trying to export {file_name} to XLS')
+
     try:
         s3_client.put_object(Bucket=bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
         logging.info(f'..data successfully saved {file_name} to bucket {bucket_name}')
@@ -336,9 +339,9 @@ def backup_master_dataset(s3_client, bucket_name):
         logging.info(f"..an error occurred: {e}")
 
 
-def save_web_csv (df_wh, s3_client, bucket_name, file_key):
+def save_web_results (df_wh, s3_client, bucket_name, file_key):
     """
-    Saves a csv containing information for the CWD webpage.
+    Saves an xls containing information for the CWD webpage to publish test results.
     """
     #filter rows to include in the webpage
     incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested']
@@ -349,8 +352,8 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
     ]
 
     #filter columns to include in the webpage
-    df_wb= df_wb[['DROPOFF_LOCATION',
-                  'CWD_EAR_CARD_ID',
+    df_wb= df_wb[['CWD_EAR_CARD_ID',
+                  'DROPOFF_LOCATION',
                   'SPECIES',
                   'SEX',
                   'WMU',
@@ -370,60 +373,57 @@ def save_web_csv (df_wh, s3_client, bucket_name, file_key):
 
     #rename the columns
     df_wb = df_wb.rename(columns={
-        'DROPOFF_LOCATION': 'Drop-off Location',
         'CWD_EAR_CARD_ID': 'CWD Ear Card',
+        'DROPOFF_LOCATION': 'Drop-off Location',
         'SPECIES': 'Species',
         'SEX': 'Sex',
-        'WMU': 'MU',
+        'WMU': 'Management Unit',
         'MORTALITY_DATE': 'Mortality Date',
-        'SAMPLED_DATE': 'Sampled Date',
+        'SAMPLED_DATE': 'Sample Date',
         'CWD_TEST_STATUS': 'CWD Status'
     })
 
-    #convert to csv
-    csv_buffer = StringIO()
-    df_wb.to_csv(csv_buffer, index=False)
-
-    #upload the csv  to S3
+    #convert to xls
     try:
-        s3_client.put_object(
-            Bucket=bucket_name, 
-            Key=file_key, 
-            Body=csv_buffer.getvalue(),
-            ContentType='text/csv'
-        )
-        logging.info(f'..public csv successfully saved to bucket {bucket_name}')
+        save_xlsx_to_os(s3_client, bucket_name, df_wb, file_key)
+        logging.info(f'..public xlsx successfully saved to bucket {bucket_name}')
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
 
-def save_lab_csv (df_wh, s3_client, bucket_name, folder):
+
+def save_lab_submission (df_wh, s3_client, bucket_name, folder):
     """
-    Saves multiple CSVs, each containing information for a specific lab submission.
+    Saves multiple xlss, each containing information for a specific lab submission.
     """
-    # delete existing CSV files in the to_Lab folder
+
+    # delete existing XLS files in the to_Lab folder
     try:
-        # collect CSV file keys to delete
+        # collect XLS file keys to delete
         response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
         if 'Contents' in response:
-            csv_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.csv')]
+            xls_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.xlsx')]
             #delete the files if there are any CSVs to remove
-            if csv_keys:
-                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': csv_keys})
-                logging.info(f"..deleted existing CSV files in folder: {folder}")
+            if xls_keys:
+                logging.info(f".. Existing files to be deleted: {xls_keys}")
+                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': xls_keys})
+                logging.info(f"..deleted existing files in folder: {folder}")
             else:
-                logging.info("..no existing CSV files found in the folder.")
+                logging.info("..no existing files found in the folder.")
         else:
             logging.info("..no files found in the folder.")
     except Exception as e:
-        logging.error(f"..an error occurred while deleting existing CSV files: {e}")
+        logging.error(f"..an error occurred while deleting existing files: {e}")
 
+    logging.info(f'..Filtering rows...')
     # Filter rows to include in the lab submission
     df_lb = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes') &
                   (df_wh['CWD_TEST_STATUS'] == 'Pending') &
                   (df_wh['REPORTING_LAB_DATE_RECEIVED'].isnull()) &
                   (df_wh['REPORTING_LAB_ID'].isnull())
     ]
+
+
 
     # Filter columns to include in the CSV
     df_lb = df_lb[['CWD_SAMPLED_IND',
@@ -445,25 +445,23 @@ def save_lab_csv (df_wh, s3_client, bucket_name, folder):
                    'CWD_TEST_STATUS_DATE',
                    'GIS_LOAD_VERSION_DATE']]
 
-    #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate CSV for each
+
+    #ADD IF statment to notify if there are not returned records.
+
+    #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate file for each
     for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
         submission_id_lowr = submission_id.lower()
-        file_key = f"{folder}cwd_sampling_lab_submission_{submission_id_lowr}.csv"
-        # Convert the group DataFrame to CSV
-        csv_buffer = StringIO()
-        group_df.to_csv(csv_buffer, index=False)
+        file_key = f"{folder}cwd_sampling_lab_submission_{submission_id_lowr}.xlsx"
+        
+        #logging.info(f'..Trying to save {submission_id} to file {file_key}')
 
-        # Upload the CSV to S3
+        #Upload the XLSX to S3
         try:
-            s3_client.put_object(
-                Bucket=bucket_name,
-                Key=file_key,
-                Body=csv_buffer.getvalue(),
-                ContentType='text/csv'
-            )
-            logging.info(f'..CSV for submission {submission_id} successfully saved to {file_key}')
+            save_xlsx_to_os(s3_client, bucket_name, group_df, file_key)
+            logging.info(f'..XLSX for submission {submission_id} successfully saved to {file_key}')
         except Exception as e:
             logging.error(f"..an error occurred while saving {file_key}: {e}")
+
 
 
 def save_spatial_files(df, s3_client, bucket_name):
@@ -778,24 +776,25 @@ if __name__ == "__main__":
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
 
-    logging.info('\nSaving a CSV for the webpage')
-    bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
-    file_key_bbx= 'Web/cwd_sampling_results_public.csv' # this points to BCBOX
-    save_web_csv (df_wh, s3_client, bucket_name_bbx, file_key_bbx)
+    logging.info('\nInitiating .... Saving an XLSX for the webpage')
+    #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
+    #file_key_bbx= 'Web/cwd_sampling_results_public.xlsx' # this points to BCBOX
+    #save_web_results (df_wh, s3_client, bucket_name_bbx, file_key_bbx)
 
     bucket_name= 'whcwdd' # this points to BGeoDrive
-    file_key= 'share_web/cwd_sampling_results_public.csv' # this points to GeoDrive
-    save_web_csv (df_wh, s3_client, bucket_name, file_key)
+    file_key= 'share_web/cwd_sampling_results_public.xlsx' # this points to GeoDrive
+    save_web_results (df_wh, s3_client, bucket_name, file_key)
 
-    logging.info('\nSaving a CSV for lab testing')
-    bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
-    folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
-    save_lab_csv (df_wh, s3_client, bucket_name_bbx, folder_bbx)
+
+    logging.info('\nInitiating .... Saving an XLSX for lab testing')
+    #bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
+    #folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
+    #save_lab_submission (df_wh, s3_client, bucket_name_bbx, folder_bbx)
 
     bucket_name= 'whcwdd' # this points to GeoDrive
     folder= 'share_labs/for_lab/' # this points to GeoDrive
-    save_lab_csv (df_wh, s3_client, bucket_name, folder)
-
+    save_lab_submission (df_wh, s3_client, bucket_name, folder)
+    
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
@@ -813,10 +812,11 @@ if __name__ == "__main__":
     longcol= 'MAP_LONGITUDE'
     published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
 
-    logging.info('\nApplying field proprities to the Feature Layer')
+    logging.info('\nApplying field properties to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-    
+
+
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
