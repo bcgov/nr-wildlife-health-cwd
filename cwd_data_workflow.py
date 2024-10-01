@@ -241,7 +241,7 @@ def add_hunter_data_to_master(df, hunter_df):
     Returns the final master df including hunter survey responses.
     """
     logging.info("..manipulating columns")
-    # convert CWD Ear Card values from df to  integer
+    # convert CWD Ear Card values from df to  integer to string
     #df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else None)
     df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) and x != 'None' else None)
  
@@ -362,10 +362,11 @@ def save_web_results (df_wh, s3_client, bucket_name, file_key):
                   'CWD_TEST_STATUS',
                   'GIS_LOAD_VERSION_DATE']]  
     
+
     #convert the 'DATE' columns to only show the date part
     for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
         #if 'DATE' in col:
-        df_wb[col] = pd.to_datetime(df[col]).dt.date
+        df_wb[col] = pd.to_datetime(df_wb[col]).dt.date
 
     #fill blank values with 'Not Recorded'
     df_wb = df_wb.fillna('Not recorded')
@@ -382,6 +383,8 @@ def save_web_results (df_wh, s3_client, bucket_name, file_key):
         'SAMPLED_DATE': 'Sample Date',
         'CWD_TEST_STATUS': 'CWD Status'
     })
+
+    print (df_wb)
 
     #convert to xls
     try:
@@ -446,7 +449,7 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
                    'GIS_LOAD_VERSION_DATE']]
 
 
-    #ADD IF statment to notify if there are not returned records.
+    #ADD IF statment to notify if there are no returned records.
 
     #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate file for each
     for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
@@ -804,7 +807,6 @@ if __name__ == "__main__":
     #logging.info('\nSaving spatial data')
     #save_spatial_files(df_wh, s3_client, bucket_name)
 
-
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
     folder='2024_CWD'
@@ -815,7 +817,6 @@ if __name__ == "__main__":
     logging.info('\nApplying field properties to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
-
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
