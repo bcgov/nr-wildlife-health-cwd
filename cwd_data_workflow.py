@@ -344,9 +344,9 @@ def save_web_results (df_wh, s3_client, bucket_name, file_key):
     Saves an xls containing information for the CWD webpage to publish test results.
     """
     #filter rows to include in the webpage
-    incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested']
+    incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested','pending', 'negative', 'Unsuitable tissue', 'Not tested','unsuitable tissue', 'not tested']
     df_wb = df_wh[
-        (df_wh['CWD_SAMPLED_IND'] == 'Yes') & 
+        #(df_wh['CWD_SAMPLED_IND'] == 'Yes') & #Discussed with Shari to include all sampling results.
         (df_wh['SAMPLED_DATE'] >= pd.Timestamp('2024-08-01')) & 
         (df_wh['CWD_TEST_STATUS'].isin(incld_sts))
     ]
@@ -804,6 +804,7 @@ if __name__ == "__main__":
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
+    
     #logging.info('\nSaving spatial data')
     #save_spatial_files(df_wh, s3_client, bucket_name)
 
@@ -817,6 +818,7 @@ if __name__ == "__main__":
     logging.info('\nApplying field properties to the Feature Layer')
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
+    
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
