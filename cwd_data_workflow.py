@@ -208,14 +208,15 @@ def process_master_dataset(df):
     # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp (PACIFIC TIME)
     pacific_timezone = pytz.timezone('America/Vancouver')
     current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
+    current_datetime_str = datetime.now(pacific_timezone).strftime('%Y%m%d_%H%M%S%p')
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
 
     # Convert all columns containing 'DATE' in their names to datetime
     date_columns = df.columns[df.columns.str.contains('DATE')]
     df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
     
-    return df
-      
+    return df, current_datetime_str
+
 
 def get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM):
     """
@@ -339,14 +340,34 @@ def backup_master_dataset(s3_client, bucket_name):
         logging.info(f"..an error occurred: {e}")
 
 
-def save_web_results (df_wh, s3_client, bucket_name, file_key):
+def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str):
     """
     Saves an xls containing information for the CWD webpage to publish test results.
     """
+
+    # delete existing XLS files in the to_Web folder
+    try:
+        # collect XLS file keys to delete
+        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
+        if 'Contents' in response:
+            xls_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.xlsx')]
+            #delete the files if there are any to remove
+            if xls_keys:
+                logging.info(f".. Existing files to be deleted: {xls_keys}")
+                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': xls_keys})
+                logging.info(f"..deleted existing files in folder: {folder}")
+            else:
+                logging.info("..no existing files found in the folder.")
+        else:
+            logging.info("..no files found in the folder.")
+    except Exception as e:
+        logging.error(f"..an error occurred while deleting existing files: {e}")
+
+
     #filter rows to include in the webpage
     incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested','pending', 'negative', 'Unsuitable tissue', 'Not tested','unsuitable tissue', 'not tested']
     df_wb = df_wh[
-        #(df_wh['CWD_SAMPLED_IND'] == 'Yes') & #Discussed with Shari to include all sampling results.
+        #(df_wh['CWD_SAMPLED_IND'] == 'Yes') & #Discussed with Shari to include all sampling results, even if not tested.
         (df_wh['SAMPLED_DATE'] >= pd.Timestamp('2024-08-01')) & 
         (df_wh['CWD_TEST_STATUS'].isin(incld_sts))
     ]
@@ -359,14 +380,17 @@ def save_web_results (df_wh, s3_client, bucket_name, file_key):
                   'WMU',
                   'MORTALITY_DATE',
                   'SAMPLED_DATE',
-                  'CWD_TEST_STATUS',
-                  'GIS_LOAD_VERSION_DATE']]  
+                  'CWD_TEST_STATUS']]
+                  #'GIS_LOAD_VERSION_DATE']]  
     
+    #print(df_wb.dtypes)
+    #print (df_wb)
 
-    #convert the 'DATE' columns to only show the date part
+    #convert the 'DATE' columns to only show the date part as long 
     for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
         #if 'DATE' in col:
-        df_wb[col] = pd.to_datetime(df_wb[col]).dt.date
+            #df_wb[col] = pd.to_datetime(df_wb[col]).dt.date   #e.g.2024-09-08
+        df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #e.g. September 1, 2024  (this converts the colum to a string type!)
 
     #fill blank values with 'Not Recorded'
     df_wb = df_wb.fillna('Not recorded')
@@ -384,7 +408,9 @@ def save_web_results (df_wh, s3_client, bucket_name, file_key):
         'CWD_TEST_STATUS': 'CWD Status'
     })
 
-    print (df_wb)
+
+    #File is named with the GIS_LOAD_VERSION_DATE (aka current_datetime string)
+    file_key = f"{folder}cwd_sampling_results_for_public_web_{current_datetime_str}.xlsx"
 
     #convert to xls
     try:
@@ -406,7 +432,7 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
         response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
         if 'Contents' in response:
             xls_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.xlsx')]
-            #delete the files if there are any CSVs to remove
+            #delete the files if there are any to remove
             if xls_keys:
                 logging.info(f".. Existing files to be deleted: {xls_keys}")
                 s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': xls_keys})
@@ -770,7 +796,7 @@ if __name__ == "__main__":
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
       
     logging.info('\nProcessing the Master dataset')
-    df= process_master_dataset (df)
+    df, current_datetime_str = process_master_dataset (df)
 
     logging.info('\nGetting Hunter Survey Data from AGOL')
     AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
@@ -781,13 +807,13 @@ if __name__ == "__main__":
 
     logging.info('\nInitiating .... Saving an XLSX for the webpage')
     #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
-    #file_key_bbx= 'Web/cwd_sampling_results_public.xlsx' # this points to BCBOX
-    #save_web_results (df_wh, s3_client, bucket_name_bbx, file_key_bbx)
+    #folder = 'Web/'       # this points to BCBOX
+    #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
 
     bucket_name= 'whcwdd' # this points to BGeoDrive
-    file_key= 'share_web/cwd_sampling_results_public.xlsx' # this points to GeoDrive
-    save_web_results (df_wh, s3_client, bucket_name, file_key)
-
+    folder= 'share_web/' # this points to GeoDrive
+    save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str)
+    
 
     logging.info('\nInitiating .... Saving an XLSX for lab testing')
     #bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
