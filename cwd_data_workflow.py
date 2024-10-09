@@ -22,7 +22,7 @@
 import warnings
 warnings.simplefilter(action='ignore')
 
-import os
+import os, sys
 import re
 import boto3
 import botocore
@@ -107,7 +107,8 @@ def get_incoming_data_from_os(s3_client):
                     except botocore.exceptions.BotoCoreError as e:
                         logging.error(f"...failed to retrieve file: {e}")
     if df_list:
-        logging.info("..appending dataframes")
+        listlen = len(df_list)
+        logging.info(f"..appending dataframes for {listlen} submission files")
         return pd.concat(df_list, ignore_index=True)
     else:
         logging.info("..no dataframes to append")
@@ -205,16 +206,59 @@ def process_master_dataset(df):
       
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df['SPATIAL_CAPTURE_DESCRIPTOR'].fillna('Unknown')
 
+    # Remove spaces from FWID (string)
+    #print(df['FWID'])
+    #df['FWID'] = df['FWID'].str.strip()
+    #re.sub(r"\s+", "", s)
+    
+    #re.sub('(?<=\d) (?=\d)', '', my_string))
+    #re.sub('(\d) (\d)', '$1$2', my_string))
+    #my_string = "my phone number is 12 345 6789"
+    #my_string = re.sub(r'(\d)\s+(\d)', r'\1\2', my_string)
+
+    '''
+    df_test = df[
+        (~df['FWID'].isnull())]   #~ is not null
+    print(df_test['FWID'])
+
+
+    #df_test = df.replace(regex=r'\s+', value='')
+    df_test = df.replace(regex=r'(?<=\d) (?=\d)', value='')
+
+    print(df_test['FWID'])
+    '''
+    
+    #print('Exiting')
+    #sys.exit()
+
     # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp (PACIFIC TIME)
+    # Also save current date/time as a string value to use later in file names.
     pacific_timezone = pytz.timezone('America/Vancouver')
     current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
     current_datetime_str = datetime.now(pacific_timezone).strftime('%Y%m%d_%H%M%S%p')
+    current_datetime_str = current_datetime_str.lower()
+
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
 
     # Convert all columns containing 'DATE' in their names to datetime
     date_columns = df.columns[df.columns.str.contains('DATE')]
     df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
-    
+
+
+    #print(df.MORTALITY_DATE)
+    #convert the 'DATE' columns to only show the date part as short - don't include 00:00:00 time
+    #  Warning:  This converts to a string vs a date type!
+    for col in date_columns:
+    #for col in ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']:    #do not use for GIS_LOAD_VERSION_DATE
+        if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':
+            df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
+            #df[col] = pd.to_datetime(df[col]).dt.normalize()  #Nope, this doesn't work.
+    #print(df.MORTALITY_DATE)
+
+    #Sort
+    #df = df.sort_values(by=['SAMPLING_SESSION_ID','WLH_ID'])
+    df = df.sort_values(by=['WLH_ID'])
+
     return df, current_datetime_str
 
 
@@ -279,7 +323,7 @@ def add_hunter_data_to_master(df, hunter_df):
     # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value = Ear Card
     #xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
     
-    # clean up xls_df to comform with ago field requirements 
+    # clean up xls_df to conform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
 
     # populate MAP_LATITUDE and MAP_LONGITUDE columns
@@ -296,8 +340,16 @@ def add_hunter_data_to_master(df, hunter_df):
     # Convert all columns containing 'DATE' in their names to datetime
     date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
     df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
-    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
+
+    #date_columns_convert = ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']
+    #for col in date_columns_convert:
+    #    df_wh[col] = pd.to_datetime(df_wh[col]).dt.date   #e.g.2024-09-08
+
+    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)   #?is this needed?
     df_wh = df_wh.replace(['NaT'], '')
+
+    #Sort
+    df_wh = df_wh.sort_values(by=['WLH_ID'])
 
     return df_wh
 
@@ -386,15 +438,18 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
     #print(df_wb.dtypes)
     #print (df_wb)
 
-    #convert the 'DATE' columns to only show the date part as long 
+    #convert the 'DATE' columns to only show the date part as long  #e.g. September 1, 2024
     for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
         #if 'DATE' in col:
             #df_wb[col] = pd.to_datetime(df_wb[col]).dt.date   #e.g.2024-09-08
-        df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #e.g. September 1, 2024  (this converts the colum to a string type!)
+        df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #(fyi - this converts the column to a string type vs date!)
 
     #fill blank values with 'Not Recorded'
     df_wb = df_wb.fillna('Not recorded')
     df_wb = df_wb.replace('', 'Not recorded')
+
+    #Sort by CWD_EAR_CARD_ID
+    df_wb = df_wb.sort_values(by=['CWD_EAR_CARD_ID'])
 
     #rename the columns
     df_wb = df_wb.rename(columns={
@@ -408,6 +463,7 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
         'CWD_TEST_STATUS': 'CWD Status'
     })
 
+    
 
     #File is named with the GIS_LOAD_VERSION_DATE (aka current_datetime string)
     file_key = f"{folder}cwd_sampling_results_for_public_web_{current_datetime_str}.xlsx"
@@ -452,44 +508,53 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
                   (df_wh['REPORTING_LAB_ID'].isnull())
     ]
 
+    # IF statment to notify if there are no returned records.
+    if df_lb.empty:
+        logging.info("..No Records found for Pending Lab Submissions!")
+    else:
+        logging.info(f"{len(df_lb.index)}... records found for Pending Lab Submissions.  Processing...")
+
+        # Filter columns to include in the CSV
+        df_lb = df_lb[['CWD_SAMPLED_IND',
+                    'CWD_LAB_SUBMISSION_ID',
+                    'WLH_ID',
+                    'CWD_EAR_CARD_ID',
+                    'SPECIES',
+                    'SAMPLED_DATE',
+                    'SAMPLE_CONDITION',
+                    'SAMPLE_CWD_TONSIL_NUM',
+                    'SAMPLE_CWD_RPLN_NUM',
+                    'SAMPLE_CWD_OBEX_IND',
+                    'SAMPLE_DATE_SENT_TO_LAB',
+                    'REPORTING_LAB',
+                    'REPORTING_LAB_DATE_RECEIVED',
+                    'REPORTING_LAB_ID',
+                    'REPORTING_LAB_COMMENT',
+                    'CWD_TEST_STATUS',
+                    'CWD_TEST_STATUS_DATE',
+                    'GIS_LOAD_VERSION_DATE']]
 
 
-    # Filter columns to include in the CSV
-    df_lb = df_lb[['CWD_SAMPLED_IND',
-                   'CWD_LAB_SUBMISSION_ID',
-                   'WLH_ID',
-                   'CWD_EAR_CARD_ID',
-                   'SPECIES',
-                   'SAMPLED_DATE',
-                   'SAMPLE_CONDITION',
-                   'SAMPLE_CWD_TONSIL_NUM',
-                   'SAMPLE_CWD_RPLN_NUM',
-                   'SAMPLE_CWD_OBEX_IND',
-                   'SAMPLE_DATE_SENT_TO_LAB',
-                   'REPORTING_LAB',
-                   'REPORTING_LAB_DATE_RECEIVED',
-                   'REPORTING_LAB_ID',
-                   'REPORTING_LAB_COMMENT',
-                   'CWD_TEST_STATUS',
-                   'CWD_TEST_STATUS_DATE',
-                   'GIS_LOAD_VERSION_DATE']]
+        #convert the 'DATE' columns to only show the date part excluding time
+        for col in ['SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB']:  
+            df_lb[col] = pd.to_datetime(df_lb[col]).dt.date   #e.g.2024-09-08
 
+        #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate file for each
+        for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
+            submission_id_lowr = submission_id.lower()
+            file_key = f"{folder}cwd_sampling_lab_submission_{submission_id_lowr}.xlsx"
 
-    #ADD IF statment to notify if there are no returned records.
+            #logging.info(f'..Trying to save {submission_id} to file {file_key}')
 
-    #iterate over each unique CWD_LAB_SUBMISSION_ID and save a separate file for each
-    for submission_id, group_df in df_lb.groupby('CWD_LAB_SUBMISSION_ID'):
-        submission_id_lowr = submission_id.lower()
-        file_key = f"{folder}cwd_sampling_lab_submission_{submission_id_lowr}.xlsx"
-        
-        #logging.info(f'..Trying to save {submission_id} to file {file_key}')
+            #Sort by WLH_ID
+            group_df = group_df.sort_values(by=['WLH_ID'])
 
-        #Upload the XLSX to S3
-        try:
-            save_xlsx_to_os(s3_client, bucket_name, group_df, file_key)
-            logging.info(f'..XLSX for submission {submission_id} successfully saved to {file_key}')
-        except Exception as e:
-            logging.error(f"..an error occurred while saving {file_key}: {e}")
+            #Upload the XLSX to S3
+            try:
+                save_xlsx_to_os(s3_client, bucket_name, group_df, file_key)
+                logging.info(f'..XLSX for submission {submission_id} successfully saved to {file_key}')
+            except Exception as e:
+                logging.error(f"..an error occurred while saving {file_key}: {e}")
 
 
 
@@ -587,7 +652,14 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(pacific_timezone, 
                                                                               ambiguous='NaT', 
                                                                               nonexistent='shift_forward')
-    
+
+    '''# DO NOT USE - this converts to string types, which are not compatible with AGO (and PowerBI?)
+    date_columns = df.columns[df.columns.str.contains('DATE')]
+    date_columns_convert = ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']
+    for col in date_columns_convert:
+        df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08                                                                       
+    '''
+
     # Fill NaN and NaT values
     df = df.fillna('')
 
@@ -798,10 +870,13 @@ if __name__ == "__main__":
     logging.info('\nProcessing the Master dataset')
     df, current_datetime_str = process_master_dataset (df)
 
+    
+    
+
     logging.info('\nGetting Hunter Survey Data from AGOL')
     AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
     hunter_df = get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM)
-
+    
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
 
@@ -830,6 +905,8 @@ if __name__ == "__main__":
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
+    #print('\nExiting...\n')
+    #sys.exit()
     
     #logging.info('\nSaving spatial data')
     #save_spatial_files(df_wh, s3_client, bucket_name)
@@ -845,7 +922,7 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
-
+    
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
