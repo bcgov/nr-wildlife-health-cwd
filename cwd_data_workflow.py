@@ -206,30 +206,23 @@ def process_master_dataset(df):
       
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df['SPATIAL_CAPTURE_DESCRIPTOR'].fillna('Unknown')
 
-    # Remove spaces from FWID (string)
-    #print(df['FWID'])
-    #df['FWID'] = df['FWID'].str.strip()
-    #re.sub(r"\s+", "", s)
+
+    # Remove spaces from FWID (string) between numbers
+    df['FWID'] = df['FWID'].str.strip()  #remove any leading and trailing spaces for all records
     
-    #re.sub('(?<=\d) (?=\d)', '', my_string))
-    #re.sub('(\d) (\d)', '$1$2', my_string))
-    #my_string = "my phone number is 12 345 6789"
-    #my_string = re.sub(r'(\d)\s+(\d)', r'\1\2', my_string)
+    #df = df[
+    #    (~df['FWID'].isnull())   # ~  Select where string is not null
+    #    ]  
+    #logging.info(f"{len(df.index)}... records found where FWID is not null.  Filling spaces...")
+    #print(df['FWID'].to_string())
+    df['FWID'] = df['FWID'].replace(regex=r'(?<=\d)\s+(?=\d)', value='')  #remove spaces between numbers in FWID
 
-    '''
-    df_test = df[
-        (~df['FWID'].isnull())]   #~ is not null
-    print(df_test['FWID'])
-
-
-    #df_test = df.replace(regex=r'\s+', value='')
-    df_test = df.replace(regex=r'(?<=\d) (?=\d)', value='')
-
-    print(df_test['FWID'])
-    '''
-    
-    #print('Exiting')
-    #sys.exit()
+    #fix date formatting in some PREP_LAB_CASSET_ID strings
+    df['PREP_LAB_ID'] = df['PREP_LAB_ID'].fillna('')
+    df['PREP_LAB_CASSET_ID'] = df['PREP_LAB_CASSET_ID'].fillna('')
+    #print(df_wh[df_wh['PREP_LAB_ID'].str.contains('23-7434')]['PREP_LAB_CASSET_ID'])
+    df['PREP_LAB_CASSET_ID']= df['PREP_LAB_CASSET_ID'].astype(str)
+    df['PREP_LAB_CASSET_ID']= df['PREP_LAB_CASSET_ID'].replace(regex=r' 00:00:00', value='')
 
     # Add the 'GIS_LOAD_VERSION_DATE' column with the current date and timestamp (PACIFIC TIME)
     # Also save current date/time as a string value to use later in file names.
@@ -245,14 +238,15 @@ def process_master_dataset(df):
     df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
 
 
+    #ADD THIS IN AGAIN to make POwerBI work?? 2024-10-10
     #print(df.MORTALITY_DATE)
-    #convert the 'DATE' columns to only show the date part as short - don't include 00:00:00 time
-    #  Warning:  This converts to a string vs a date type!
-    for col in date_columns:
-    #for col in ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']:    #do not use for GIS_LOAD_VERSION_DATE
-        if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':
-            df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
-            #df[col] = pd.to_datetime(df[col]).dt.normalize()  #Nope, this doesn't work.
+    ##convert the 'DATE' columns to only show the date part as short - don't include 00:00:00 time
+    ## DO IN Web and Lab exports instead.  Need full dates for AGO and PowerBI(?)
+    ##  Warning:  This converts to a string vs a date type!
+    #for col in date_columns:
+    #    if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':  #exclude GIS_LOAD_VERSION_DATE
+    #        df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
+    
     #print(df.MORTALITY_DATE)
 
     #Sort
@@ -341,11 +335,17 @@ def add_hunter_data_to_master(df, hunter_df):
     date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
     df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
 
+    ##Beware! This converts to String type! May not be compatible if using in PowerBI,etc.
     #date_columns_convert = ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']
     #for col in date_columns_convert:
-    #    df_wh[col] = pd.to_datetime(df_wh[col]).dt.date   #e.g.2024-09-08
+    #    df_wh[col] = pd.to_datetime(df_wh[col]).dt.date   #e.g.2024-09-08  
 
-    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)   #?is this needed?
+    #COLLECTION_DATE to string (for PowerBI?)
+    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
+
+    
+
+    #replace Not a Time NaT for entire dataframe
     df_wh = df_wh.replace(['NaT'], '')
 
     #Sort
@@ -440,8 +440,6 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
 
     #convert the 'DATE' columns to only show the date part as long  #e.g. September 1, 2024
     for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
-        #if 'DATE' in col:
-            #df_wb[col] = pd.to_datetime(df_wb[col]).dt.date   #e.g.2024-09-08
         df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #(fyi - this converts the column to a string type vs date!)
 
     #fill blank values with 'Not Recorded'
