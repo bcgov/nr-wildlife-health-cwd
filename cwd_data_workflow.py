@@ -243,9 +243,9 @@ def process_master_dataset(df):
     ##convert the 'DATE' columns to only show the date part as short - don't include 00:00:00 time
     ## DO IN Web and Lab exports instead.  Need full dates for AGO and PowerBI(?)
     ##  Warning:  This converts to a string vs a date type!
-    #for col in date_columns:
-    #    if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':  #exclude GIS_LOAD_VERSION_DATE
-    #        df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
+    for col in date_columns:
+        if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':  #exclude GIS_LOAD_VERSION_DATE
+            df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
     
     #print(df.MORTALITY_DATE)
 
@@ -335,6 +335,8 @@ def add_hunter_data_to_master(df, hunter_df):
     date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
     df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
 
+    #ADD This back in?
+    #strip time portion of date/time
     ##Beware! This converts to String type! May not be compatible if using in PowerBI,etc.
     #date_columns_convert = ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']
     #for col in date_columns_convert:
@@ -343,9 +345,8 @@ def add_hunter_data_to_master(df, hunter_df):
     #COLLECTION_DATE to string (for PowerBI?)
     df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
 
-    
 
-    #replace Not a Time NaT for entire dataframe
+    #replace Not a Time (NaT) for entire dataframe
     df_wh = df_wh.replace(['NaT'], '')
 
     #Sort
@@ -869,8 +870,6 @@ if __name__ == "__main__":
     df, current_datetime_str = process_master_dataset (df)
 
     
-    
-
     logging.info('\nGetting Hunter Survey Data from AGOL')
     AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
     hunter_df = get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM)
@@ -903,6 +902,7 @@ if __name__ == "__main__":
     save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
+    
     #print('\nExiting...\n')
     #sys.exit()
     
