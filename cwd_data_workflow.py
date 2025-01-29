@@ -32,10 +32,12 @@ import geopandas as gpd
 import numpy as np
 from io import BytesIO, StringIO
 from arcgis.gis import GIS
+from arcgis.features import FeatureLayer
 
 import logging
 import timeit
 import pytz
+from pytz import timezone
 from datetime import datetime, timedelta
 
 
@@ -113,7 +115,7 @@ def get_incoming_data_from_os(s3_client):
     else:
         logging.info("..no dataframes to append")
         return pd.DataFrame()
-
+    
 
 def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     """
@@ -230,6 +232,7 @@ def process_master_dataset(df):
     current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
     current_datetime_str = datetime.now(pacific_timezone).strftime('%Y%m%d_%H%M%S%p')
     current_datetime_str = current_datetime_str.lower()
+    timenow_rounded = datetime.now().astimezone(pacific_timezone)
 
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
 
@@ -253,7 +256,7 @@ def process_master_dataset(df):
     #df = df.sort_values(by=['SAMPLING_SESSION_ID','WLH_ID'])
     df = df.sort_values(by=['WLH_ID'])
 
-    return df, current_datetime_str
+    return df, current_datetime_str, timenow_rounded
 
 
 def get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM):
@@ -840,6 +843,91 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     else:
         logging.info("..failed to update field properties. Response:", response)
 
+def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, spatial_fl_id):
+    """
+    Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MOE Region
+    """ 
+
+    logging.info(f'\nSummarizing Data by...{df_sum_fld} and joining to the AGO Feature Layer' )
+    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+    print('CWD_SAMPLED_IND = Yes:  ',len(df_sampled))
+
+
+    # Filter columns to include
+    df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND']]
+    #Group by the spatial unit field and count the number of samples
+    df_unit_count = df_unit_sampled.groupby(df_sum_fld)['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
+    df_unit_count = df_unit_count.sort_values(by=[df_sum_fld])
+    print(f'Number of summary units with sampled data for {df_sum_fld}: {df_unit_count}')
+
+    ## Save the summary to a file in object storage - for initial testing
+    logging.info('\nSaving the TEST summary')
+    bucket_name='whcwdd'
+    summary_file_name = df_sum_fld+'_rollup_summary.xlsx'
+    save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/rollup_test/'+summary_file_name)
+    
+    
+    ##### Use Pandas Dataframes to update AGO Layers
+    ## get spatial features from AGO
+    summ_zones = gis.content.get(spatial_fl_id)
+    summ_zones_lyr = summ_zones.layers[0]
+    summ_zones_fset = summ_zones_lyr.query()
+    summ_zones_features = summ_zones_fset.features
+    summ_zones_sdf = summ_zones_fset.sdf
+    #print(summ_zones_sdf)
+
+    # find  rows in sampling summary that don't have a spatial unit match.  These are probably due to data entry errors.
+    df_mismatch_errors = df_unit_count[~df_unit_count[df_sum_fld].isin(summ_zones_sdf[fl_sum_fld])]
+    print('\nCHECK DATA: The following unit(s) do not exist in the spatial data:  \n',df_mismatch_errors)
+
+    # find overlapping rows
+    print(f"\nChecking for intersecting rows based on {df_sum_fld}/{fl_sum_fld}...this could take awhile...")
+    overlap_rows = pd.merge(left = summ_zones_sdf, right = df_unit_count, how='inner', left_on = fl_sum_fld , right_on = df_sum_fld)
+    rcount = len(overlap_rows)
+    #rcount = overlap_rows.count()
+    print(f'Number of Intersecting Rows: {rcount}')
+    #print(overlap_rows)
+
+    
+    #Update cursor using the summary df directly (vs converting it to a hosted table in AGO)
+    #First, set default Feature Layer rollup to 0 and the current date/time
+    uCount = 0
+    print("\nCalculating default values for Feature Layer...this could take awhile...")
+    for feature in summ_zones_features:
+        try:
+            feature.attributes['CWD_SAMPLE_COUNT'] = 0
+            feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded
+            summ_zones_lyr.edit_features(updates=[feature])
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update Feature Layer with default values. Exception: {e}")
+            print('\nExiting...\n')
+            sys.exit()
+            #continue
+
+    print("DONE Calculating default values for ",uCount, " records!")
+    
+    uCount = 0   #reset counter
+
+    logging.info('Updating the AGO Feature Layer with the summary data...')
+    #Then update the Feature Layer with the summary data for matching records
+    for UNIT_ID in overlap_rows[fl_sum_fld]:
+        try:
+            summ_feature = [f for f in summ_zones_features if f.attributes[fl_sum_fld] == UNIT_ID][0]  #get the spatial feature
+            summary_row = df_unit_count.loc[df_unit_count[df_sum_fld] == UNIT_ID]#,['Sample_Count']] #get the dataframe summary row
+            summary_val = summary_row['Sample_Count'].values[0]  #get the sample count value
+            #print(summary_val)
+            summ_feature.attributes['CWD_SAMPLE_COUNT'] = str(summary_val)
+            #summ_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
+            summ_zones_lyr.edit_features(updates=[summ_feature])
+            #print(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}", flush=True)
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update {UNIT_ID}. Exception: {e}")
+            continue
+
+    #print("\nDONE updating ",uCount, " records!")
+    logging.info(f'DONE updating the AGO Feature Layer with the summary data for:  {uCount} records.')
 
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
@@ -858,7 +946,6 @@ if __name__ == "__main__":
     AGO_PASSWORD = os.getenv('AGO_PASSWORD')
     gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
     
-    #'''
     if s3_client:
         logging.info('\nRetrieving Incoming Data from Object Storage')
         df = get_incoming_data_from_os(s3_client)
@@ -867,15 +954,15 @@ if __name__ == "__main__":
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
       
     logging.info('\nProcessing the Master dataset')
-    df, current_datetime_str = process_master_dataset (df)
+    df, current_datetime_str, timenow_rounded = process_master_dataset (df)
 
-    
     logging.info('\nGetting Hunter Survey Data from AGOL')
     AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
     hunter_df = get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM)
     
     logging.info('\nAdding hunter data to Master dataset')
     df_wh= add_hunter_data_to_master(df, hunter_df)
+
 
     logging.info('\nInitiating .... Saving an XLSX for the webpage')
     #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
@@ -899,7 +986,7 @@ if __name__ == "__main__":
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
-    save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #lab data
+    #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
     
@@ -920,7 +1007,11 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
-    
+    logging.info(f'\nSummarizing Data by spatial units.' )
+    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', '0b81e46151184058a88c701853e09577')
+    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', '118379ce29f94faeaa724d2055ea235c')
+
+
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
