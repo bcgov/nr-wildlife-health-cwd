@@ -87,6 +87,9 @@ def get_dropoff_locations(s3_client, bucket_name):
     # Set 'CONTACT_NAME' and 'CONTACT_INFO' to None if 'PUBLIC_CONTACT_INFO_IND' is 'No'
     df.loc[df['PUBLIC_CONTACT_INFO_IND'] == 'No', ['CONTACT_NAME', 'CONTACT_INFO']] = None
 
+    # UPDATE:  Also set 'CONTACT_NAME' and 'CONTACT_INFO' to None if '24/7_ACCESS' is 'Temporarily Inactive'
+    df.loc[df['24/7_ACCESS'] == 'Temporarily Inactive', ['CONTACT_NAME', 'CONTACT_INFO']] = None
+    
     # Drop columns
     df = df.drop(columns=['PUBLIC_CONTACT_INFO_IND', 'NOTES', 'CONFIRMED', 'ON_WEBSITE'])
 
@@ -99,7 +102,7 @@ def get_dropoff_locations(s3_client, bucket_name):
             'POSTAL_CODE': {'Alias': 'Postal Code', 'Length': 7},
             'Lat': {'Alias': 'Latitude', 'Length': 10},
             'Long': {'Alias': 'Longitude', 'Length': 10},
-            'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 5},
+            'F24_7_ACCESS': {'Alias': '24/7 Access', 'Length': 25},
             'MORE_INFO': {'Alias': 'Details', 'Length': 400},
             'CONTACT_NAME': {'Alias': 'Contact Name', 'Length': 50},
             'CONTACT_INFO': {'Alias': 'Contact Information', 'Length': 40}
