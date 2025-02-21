@@ -2,11 +2,14 @@
 # Name:        Chronic Wasting Disease (CWD) Data Workflow
 #
 # Purpose:     This script streamlines the Chronic Wasting Disease (CWD) data processing pipeline by:
-#               (1) Retrieving incoming lab data from Object Storage
-#               (2) Retrieving data from the Hunter survey
-#               (3) Merging and processing all data sources
-#               (4) Generating a master dataset
-#               (5) Publishing the master dataset to ArcGIS Online (AGO)
+#                 (1) Retrieve Incoming Data: Fetches incoming lab data and hunter survey data from Object Storage and ArcGIS Online (AGO).
+#                 (2) Merge and Process Data: Merges and processes data from various sources to create a master dataset.
+#                 (3) Generate Master Dataset: Creates a comprehensive master dataset that includes lab and hunter survey data.
+#                 (4) Publish to AGO: Publishes the master dataset to ArcGIS Online and updates Hunter Survey in AGO with QA flags.
+#                 (5) Generate Files for Web and Lab Submissions: Creates files for the CWD webpage and lab submissions.
+#                 (6) Summarize Sampling Statistics: Rolls up summary sampling statistics by Management Unit (MU) and Region.
+#                 (7) Perform QA: Conducts quality assurance checks on the hunter survey data against the master sampling dataset
+#                     and compares MU and Environment Region from the Ear Card vs spatial location.
 #              
 # Input(s):    (1) Object Storage credentials.
 #              (1) AGO credentials.           
@@ -16,7 +19,7 @@
 #              Sasha Lees - GeoBC
 #
 # Created:     2024-08-15
-# Updated:     
+# Updates ongoing - see GitHub for details.
 #-------------------------------------------------------------------------------
 
 import warnings
@@ -139,11 +142,82 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
             
     return df_rg, df_mu
 
+def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
+    """
+    Returns a df containing hunter survey data from AGO and manipulate time columns to pacific time vs UTC.
+    """
+
+    # get the ago item
+    #hunter_survey_item = gis.content.search(query=AGO_HUNTER_ITEM, item_type="Feature Layer")
+    hunter_survey_item = gis.content.get(AGO_HUNTER_ITEM_ID)
+    #print(hunter_survey_item)
+
+    # get the ago feature layer
+    hunter_flayer = hunter_survey_item.layers[0]
+
+    # query the feature layer to get its data
+    hunter_data = hunter_flayer.query().sdf
+
+    # convert the feature layer data to pandas dataframe
+    hunter_df = pd.DataFrame(hunter_data)
+
+    
+    #backup initial hunter data from AGO, before updating with new QA flags.
+    # NOTE THAT Date/times are in UTC!  Cannot export to excel if 'time aware'. 
+    # Also, AGO stores date/times in UTC behind the scenes, but would appear as Pacific time in the table.
+    # So keep as UTC in case the data is re-imported to AGO.
+    save_xlsx_to_os(s3_client, 'whcwdd', hunter_df, f'hunter_survey/ago_backups/cwd_hunter_survey_data_from_ago_backup_{current_datetime_str}.xlsx')
+
+
+    #Convert UTC Date Times from AGO to Pacific Time
+    for col in ['CreationDate','EditDate','HUNTER_MORTALITY_DATE','HUNTER_SUBMIT_DATE_TIME']:  
+        # Convert to datetime and localize to UTC
+        hunter_df[col] = pd.to_datetime(hunter_df[col], errors='coerce').dt.tz_localize('UTC')
+        # Convert to Pacific time
+        hunter_df[col] = hunter_df[col].dt.tz_convert(pacific_timezone)
+        #Then remove time aware, as this is required below.
+        hunter_df[col] = hunter_df[col].dt.tz_localize(None)
+            
+    print(f"Number of Hunter Survey Records from AGO:  {len(hunter_df)}")
+
+    return hunter_df
+
+def get_ago_flayer(ago_flayer_id):
+    """
+    Returns AGO feature layers features and spatial datafram
+
+    Input:
+    -ago_flayer_id:  AGO item ID for the feature layer
+
+    """
+    ago_flayer_item = gis.content.get(ago_flayer_id)
+    ago_flayer_lyr = ago_flayer_item.layers[0]
+    ago_flayer_fset = ago_flayer_lyr.query()
+    ago_features = ago_flayer_fset.features
+    ago_flayer_sdf = ago_flayer_fset.sdf
+
+    return ago_flayer_lyr, ago_flayer_fset, ago_features, ago_flayer_sdf
+
+def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
+    """
+    Saves an xlsx to Object Storage bucket.
+    """
+    xlsx_buffer = BytesIO()
+    df.to_excel(xlsx_buffer, index=False)
+    xlsx_buffer.seek(0)
+
+    #logging.info(f'..Trying to export {file_name} to XLS')
+
+    try:
+        s3_client.put_object(Bucket=bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
+        logging.info(f'..data successfully saved {file_name} to bucket {bucket_name}')
+    except botocore.exceptions.ClientError as e:
+        logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
 
 def process_master_dataset(df):
     """
     Populates missing Latitude and Longitude values
-    Fromat Datetime columns
+    Format Datetime columns
     """
     logging.info("..cleaning-up data")
     df['LATITUDE_DD'] = pd.to_numeric(df['LATITUDE_DD'], errors='coerce')
@@ -259,34 +333,212 @@ def process_master_dataset(df):
     return df, current_datetime_str, timenow_rounded
 
 
-def get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM):
+def hunter_qa_and_updates_to_master(df, hunter_df):
     """
-    Returns a df containing hunter survey data from AGO 
+    Inputs:
+        - df: Master Sampling dataset - all combined sampling records
+        - hunter_df: Hunter Survey data from AGO - all records
+
+    Outputs:  
+        1. All Hunter Survey (hs) records from AGO with QA flags for where there are discrepancies between the Hunter Survey data and the Master Sampling dataset.
+           Flagged discrepancies are exported as an xls file (cwd_hunter_survey_flags_for_review_<datetime>.xlsx) to Object Storage for WH Team review, and QA flags are updated back to the Hunter data AGO.
+           The WH Team will review the discrepancies and update the individual Sampling sheets as needed. They will
+           update the two Review fields as appropriate, which will subsequently be added to the Hunter Survey data in AGO by this script.
+        2. The Master Sampling dataset for which the lat/long and map source descriptor is corrected based on the hunter survey data, where there is a matching hs record.
+           This does not include Hunter Survey records where there is no matching Ear Tag ID and therefore there is no sampling data yet.
+
+        - hs_merged_df:   all hunter survey records with new qa columns and duplicates identified
+        - flagged_hs_df:  flagged hunter survey records for qa review
+        - df_wh:          updated master sampling dataset with hunter (wh) survey matches
     """
-    # get the ago item
-    hunter_survey_item = gis.content.search(query=AGO_HUNTER_ITEM, item_type="Feature Layer")[0]
+    #logging.info("..calculating Hunter Survey QA flags")
 
-    # get the ago feature layer
-    hunter_flayer = hunter_survey_item.layers[0]
+    # Length of initial dataframes
+    print(f"\n\t{len(df.index)}... Total Sampling Records in df")
+    print(f"\t{len(hunter_df.index)}... Total Hunter Survey Records in hunter_df\n")
 
-    # query the feature layer to get its data
-    hunter_data = hunter_flayer.query().sdf
+    cols = [
+    "HUNTER_CWD_EAR_CARD_ID",
+    "HUNTER_CWD_EAR_CARD_ID_TEXT",
+    "HUNTER_SUBMIT_DATE_TIME",
+    "HUNTER_MORTALITY_DATE",
+    "HUNTER_SPECIES",
+    "HUNTER_SEX",
+    "HUNTER_LATITUDE_DD",
+    "HUNTER_LONGITUDE_DD",
+    "GEO_CHECK_PROV",
+    "QA_HUNTER_SURVEY_FLAG",
+    "QA_HUNTER_SURVEY_FLAG_DESC",
+    "QA_HUNTER_EARCARD_DUPLICATE",
+    "QA_HUNTER_SURVEY_REVIEW_STATUS",
+    "QA_HUNTER_SURVEY_REVIEW_COMMENTS"
+    ]
 
-    # convert the feature layer data to pandas dataframe
-    hunter_df = pd.DataFrame(hunter_data)
+    hunter_df = hunter_df[cols]
 
-    return hunter_df
+    logging.info("..calculating Hunter Survey QA field defaults")
+    # calc/reset default values for qa hunter columns. This will be re-calculated below.
+    #hunter_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC']] = None
+    hunter_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','QA_HUNTER_EARCARD_DUPLICATE']] = ''
+    hunter_df['QA_HUNTER_CHECK_DATE_TIME'] = current_datetime
 
-
-def add_hunter_data_to_master(df, hunter_df):
-    """
-    Returns the final master df including hunter survey responses.
-    """
-    logging.info("..manipulating columns")
+    logging.info("..manipulating CWD_EAR_CARD_ID column")
     # convert CWD Ear Card values from df to  integer to string
-    #df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else None)
     df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) and x != 'None' else None)
  
+ 
+    # NOTE!  There may be duplicate Ear Card IDs in both the sampling data and the Hunter Survey data.  
+    # May need to drop duplicates in df before joining to avoid addition of cross rows?
+    # This should be checked and resolved by the Wildlife Health Team.
+    logging.info("..joining matching sampling records to hunter survey data")
+    hs_merged_df = pd.merge(left=hunter_df,
+                         right=df, 
+                         left_on='HUNTER_CWD_EAR_CARD_ID_TEXT', 
+                         right_on='CWD_EAR_CARD_ID', 
+                         how='left', 
+                         indicator=True)
+
+    #print(f"\n\t{len(hs_merged_df.index)}... total records in hs_merged_df\n")
+    
+
+    logging.info("..calculating Hunter Survey QA flags")
+        
+    # Flag records that DO NOT have an ear card id in the master sampling dataset, Otherwise, Matched
+    # Note again, that there may be duplicate Ear Card IDs in both the sampling data and the Hunter Survey data.
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where(hs_merged_df['_merge'] == 'left_only',
+                                                'No Sampling Match', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])  #'Matched')
+
+    #Flag records that DO have an ear card id in the master sampling dataset
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where(hs_merged_df['_merge'] == 'both',
+                                                'Matched', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
+    
+    # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the species do not match
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['HUNTER_SPECIES']) &
+                                               (hs_merged_df['SPECIES'].notna() & hs_merged_df['HUNTER_SPECIES'].notna()), 
+                                               'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
+    
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['HUNTER_SPECIES']) &
+                                                        (hs_merged_df['SPECIES'].notna() & hs_merged_df['HUNTER_SPECIES'].notna()), 
+                                                        #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Species;',
+                                                        'Species',
+                                                        hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'])
+
+    # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the sex does not match
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SEX'] != hs_merged_df['HUNTER_SEX']) &
+                                               (hs_merged_df['SEX'].notna() & hs_merged_df['HUNTER_SEX'].notna()), 
+                                               'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
+    
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SEX'] != hs_merged_df['HUNTER_SEX']) &
+                                                     (hs_merged_df['SEX'].notna() & hs_merged_df['HUNTER_SEX'].notna()), 
+                                                     #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Sex;',
+                                                     hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('') + ', Sex',
+                                                     #', Sex',
+                                                     hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'])
+
+    # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the mortality dates do not match
+    # Ensure date formats match - Converted to Pacific Time (above) and then to date part only
+    hs_merged_df['MORTALITY_DATE'] = pd.to_datetime(hs_merged_df['MORTALITY_DATE'], errors='coerce').dt.date
+    hs_merged_df['HUNTER_MORTALITY_DATE'] = pd.to_datetime(hs_merged_df['HUNTER_MORTALITY_DATE'], errors='coerce').dt.date
+    
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['HUNTER_MORTALITY_DATE']) &
+                                               (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['HUNTER_MORTALITY_DATE'].notna()), 
+                                               'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
+    
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['HUNTER_MORTALITY_DATE']) &
+                                                     (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['HUNTER_MORTALITY_DATE'].notna()), 
+                                                     #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Mortality Date;',
+                                                     hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('') + ', Mortality Date', 
+                                                     #', Mortality Date',
+                                                     hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'])
+    
+    # Update QA_HUNTER_SURVEY_FLAG_DESC if there are hanging commas
+    def update_error_desc(desc):
+        #print(f"Processing desc: {desc}")  # Debugging print statement
+        if pd.isna(desc):
+            return desc
+        return desc.lstrip(", ")
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].apply(update_error_desc)
+
+    #Drop temporary column from above
+    hs_merged_df = hs_merged_df.drop(columns='_merge')
+
+    # Find duplicate Ear Card IDs and set QA_HUNTER_EARCARD_DUPLICATE to 'DUPLICATE'
+    hs_merged_df['QA_HUNTER_EARCARD_DUPLICATE'] = np.where(hs_merged_df.duplicated(subset='HUNTER_CWD_EAR_CARD_ID', keep=False), 'DUPLICATE', '')
+    
+
+    # Convert time aware datetime columns to string, otherwise cannot export to xls
+    for col in ['MORTALITY_DATE','HUNTER_MORTALITY_DATE','HUNTER_SUBMIT_DATE_TIME']: 
+        #hs_merged_df[col] = hs_merged_df[col].dt.tz_convert(None)  #remove timezone info (but it's still time aware)
+        hs_merged_df[col] = hs_merged_df[col].astype(str)
+        #hs_merged_df[col] = hs_merged_df[col].dt.tz_localize(None)
+    
+
+    # Fill nan values with empty strings
+    hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
+    
+    #Export the Hunter Survey QA flags and associated sampling data to an XLS file for review by the WH Team
+    export_cols = [
+        "HUNTER_CWD_EAR_CARD_ID",
+        "HUNTER_SUBMIT_DATE_TIME",
+        "HUNTER_MORTALITY_DATE",
+        "MORTALITY_DATE",
+        "HUNTER_SPECIES",
+        "SPECIES",
+        "HUNTER_SEX",
+        "SEX",
+        "HUNTER_LATITUDE_DD",
+        "HUNTER_LONGITUDE_DD",
+        "GEO_CHECK_PROV",
+        "QA_HUNTER_SURVEY_FLAG",
+        "QA_HUNTER_SURVEY_FLAG_DESC",
+        "QA_HUNTER_EARCARD_DUPLICATE",
+        "QA_HUNTER_SURVEY_REVIEW_STATUS",
+        "QA_HUNTER_SURVEY_REVIEW_COMMENTS",
+        "QA_HUNTER_CHECK_DATE_TIME",
+        "SAMPLING_SESSION_ID",
+        "CWD_LAB_SUBMISSION_ID",
+        "FISCAL_YEAR",
+        "WLH_ID",
+        "CWD_EAR_CARD_ID",
+        "MORTALITY_CAUSE",
+        "AGE_CLASS",
+        "AGE_ESTIMATE",
+        "DROPOFF_LOCATION",
+        "ENV_REGION_NAME",
+        "WMU",
+        "SUBMITTER_TYPE",
+        "SUBMITTER_FIRST_NAME",
+        "SUBMITTER_LAST_NAME",
+        "SUBMITTER_PHONE",
+        "FWID",
+        "SAMPLED_DATE",
+        "CWD_SAMPLED_IND",
+        "CWD_NOT_SAMPLED_REASON",
+        "SAMPLING_NOTES",
+        "CWD_TEST_STATUS",
+        "CWD_TEST_STATUS_DATE",
+        "GIS_LOAD_VERSION_DATE"
+       ]
+  
+    
+    #Re-orders the columns, as listed above. Then sort.
+    flagged_hs_df = hs_merged_df[export_cols]
+    flagged_hs_df = flagged_hs_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC'])
+
+    # Select only the records that have QA flags (Not Matched) or are duplicates of Ear Card IDs
+    flagged_hs_df = flagged_hs_df[(flagged_hs_df['QA_HUNTER_SURVEY_FLAG'] != 'Matched') | (flagged_hs_df['QA_HUNTER_EARCARD_DUPLICATE'] == 'DUPLICATE')]
+    
+    print(f"\n\t{len(flagged_hs_df.index)}... flagged hunter survey qa records found ... of a total of {len(hs_merged_df.index)} hs_merged_df records\n")
+    
+    logging.info("..saving the Hunter Survey QA flags to xls")
+    save_xlsx_to_os(s3_client, 'whcwdd', flagged_hs_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_1_flags_for_review_{current_datetime_str}.xlsx')
+    # TEMP
+    save_xlsx_to_os(s3_client, 'whcwdd', hs_merged_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_2_all_records_and_flags_{current_datetime_str}.xlsx')
+    
+
+    #--------------------------------------------- end of the QA checks ----------------------------------------------
+    #  Merge the Hunter Survey data with the Master Sampling data:
+    
     cols = [
     "HUNTER_MORTALITY_DATE",
     "HUNTER_SPECIES",
@@ -297,28 +549,42 @@ def add_hunter_data_to_master(df, hunter_df):
     "HUNTER_CWD_EAR_CARD_ID",
     "HUNTER_SUBMIT_DATE_TIME"
     ]   
-    hunter_df =hunter_df[cols]
-    
-    logging.info("..merging dataframes")
+
+    hunter_df = hunter_df[cols]
+    hunter_df_no_dups = hunter_df.drop_duplicates(subset="HUNTER_CWD_EAR_CARD_ID_TEXT", keep="last")
+
+    logging.info("\n..merging hunter survey results to sampling dataframe")
     # merge the dataframes
+    # note that if there are duplicate Ear Card IDs in the hunter survey data, 
+    # then there will be multiple records in the merged dataframe, if drop_duplicates is not used, above.
+    # This could be a problem if the last record is not the 'best' but will be resolved once the hunter survey spatial data is corrected.
+    # if drop_duplicates is used, then only the 'last' hunter survey record will be kept.  
+
+    # Length of initial dataframes
+    #print(f"\n\t{len(df.index)}...  Sampling Records in df")
+    #print(f"\t{len(hunter_df.index)}...  Hunter Survey Records in hunter_df")
+    #print(f"\t{len(hunter_df_no_dups.index)}...  Hunter Survey Records in hunter_df_no_dups\n")
+
     combined_df = pd.merge(left=df,
-                           right=hunter_df,
-                           how="left",
-                           left_on="CWD_EAR_CARD_ID",
-                           right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
+                       right=hunter_df_no_dups,
+                       how="left",
+                       left_on="CWD_EAR_CARD_ID",
+                       right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
+                       #right_on="HUNTER_CWD_EAR_CARD_ID_TEXT").drop_duplicates(subset="HUNTER_CWD_EAR_CARD_ID_TEXT", keep="last")
+    
+    #print(f"\t{len(combined_df.index)}... records in combined_df")
     
     logging.info("..cleaning dataframes")
-    # filter df for where hunters have updated data
+    # filter df for where hunters have updated data.  i.e. sex cannot be null.
     hunter_matches_df = combined_df[combined_df.HUNTER_SEX.notnull()].copy()
-
+    
     # filter df for where hunters have not updated data
     xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
 
+    
     # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = Hunter Survey
-    xls_df['MAP_SOURCE_DESCRIPTOR']=  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
+    xls_df['MAP_SOURCE_DESCRIPTOR'] =  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
     hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter Survey"
-    # for xls_df - update MAP_SOURCE_DESCRIPTOR w/ value = Ear Card
-    #xls_df['MAP_SOURCE_DESCRIPTOR'] = "Ear Card"
     
     # clean up xls_df to conform with ago field requirements 
     xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
@@ -327,9 +593,12 @@ def add_hunter_data_to_master(df, hunter_df):
     hunter_matches_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = hunter_matches_df[['HUNTER_LATITUDE_DD', 'HUNTER_LONGITUDE_DD']]
     xls_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = xls_df[['LATITUDE_DD', 'LONGITUDE_DD']]
 
+    #print(f"\n\t{len(hunter_matches_df.index)}... records in hunter_matches_df")
+    #print(f"\t{len(xls_df.index)}... records in xls_df")
+
     # re-combine dataframes
     df_wh = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
-
+    
     # Move columns to the last position
     df_wh['MAP_SOURCE_DESCRIPTOR'] = df_wh.pop('MAP_SOURCE_DESCRIPTOR')
     df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')
@@ -348,52 +617,527 @@ def add_hunter_data_to_master(df, hunter_df):
     #COLLECTION_DATE to string (for PowerBI?)
     df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
 
-
     #replace Not a Time (NaT) for entire dataframe
     df_wh = df_wh.replace(['NaT'], '')
 
     #Sort
     df_wh = df_wh.sort_values(by=['WLH_ID'])
 
-    return df_wh
+    print(f"\n\t{len(df_wh.index)}... records in df_wh")
+    print(f"\t{len(hs_merged_df.index)}... records in hs_merged_df")
+    print(f"\t{len(flagged_hs_df.index)}... records in flagged_hs_df\n")
 
+    return df_wh, hs_merged_df, flagged_hs_df
 
-def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
+def update_hs_review_tracking_list(flagged_hs_df):
+
     """
-    Saves an xlsx to Object Storage bucket.
-    """
-    xlsx_buffer = BytesIO()
-    df.to_excel(xlsx_buffer, index=False)
-    xlsx_buffer.seek(0)
+    Reads the existing master hunter survey QA tracking xls file into a dataFrame, reads new hs data from AGO, 
+    compares the records, and appends new records based on HUNTER_CWD_EAR_CARD_ID to the master tracking dataFrame.
 
-    #logging.info(f'..Trying to export {file_name} to XLS')
-
-    try:
-        s3_client.put_object(Bucket=bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
-        logging.info(f'..data successfully saved {file_name} to bucket {bucket_name}')
-    except botocore.exceptions.ClientError as e:
-        logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
-        
-
-def backup_master_dataset(s3_client, bucket_name):
-    """
-    Creates a backup of the Master dataset
-    """
-    pacific_timezone = pytz.timezone('America/Vancouver')
-    yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
-    dytm = yesterday.strftime("%Y%m%d")
-    source_file_path = 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx'
-    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset_sampling_w_hunter.xlsx'
+    This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
+    This lets the team see what the original QA flags were, and what changes were made to the records.
     
-    try:
-        s3_client.copy_object(
-            Bucket=bucket_name,
-            CopySource={'Bucket': bucket_name, 'Key': source_file_path},
-            Key=destination_file_path
-        )
-        logging.info("..old master dataset backed-up successfully")
-    except Exception as e:
-        logging.info(f"..an error occurred: {e}")
+    Parameters:
+    - flagged_hs_df: DataFrame containing the flagged hunter survey records.
+    
+    Outputs:
+    - updated_tracking_df:  Updated static master hunter survey with newly flagged qa records appended.
+    """
+
+    # Read the static master XLS file into a DataFrame
+    static_xls_path = 'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx'
+    logging.info(f"...reading file: {static_xls_path}")
+    obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+    data = obj['Body'].read()
+    excel_file = pd.ExcelFile(BytesIO(data))
+
+    static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
+
+    # Compare records and append new flagged hunter survey records to the static DataFrame
+    new_records = flagged_hs_df[~flagged_hs_df['HUNTER_CWD_EAR_CARD_ID'].isin(static_df['HUNTER_CWD_EAR_CARD_ID'])]
+    
+    # Append new records to the static DataFrame
+    updated_tracking_df = pd.concat([static_df, new_records], ignore_index=True)
+
+    # Fill nan values with empty strings
+    updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
+    #replace Not a Time (NaT) for entire dataframe
+    updated_tracking_df = updated_tracking_df.replace(['NaT'], '')
+
+    # Sort the DataFrame
+    updated_tracking_df = updated_tracking_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','HUNTER_CWD_EAR_CARD_ID'])
+
+    # Overwrite to xls
+    logging.info("..saving the revised tracking list to xls")
+    print(f"\n{len(new_records)}... new flagged records found for Hunter Survey... added to {len(static_df)} existing records\n")
+    #save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/hunter_survey_mismatches/cwd_hunter_survey_qa_flag_status_tracking_master_{current_datetime_str}.xlsx')
+    save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx')
+
+    return updated_tracking_df
+
+
+def update_hunter_flags_to_ago(df_hs, df_tracking_status, spatial_fl_id):
+    """
+    Update the AGO Hunter Survey Feature layer with the latest QA flags (Species, Sex, Mortalitiy Date mismatches) 
+    from df_hs, and the qa tracking status from updated_tracking_df/df_tracking_status
+    
+    Note that some hunter survey FL records aren't being updated by the script, 
+    e.g. if there are duplicate IDs, or if new records are added in the hunter survey after the data is grabbed from AGO.
+
+    Inputs:
+    - df_hs: DataFrame containing all hunter survey data, with QA flags.
+    - df_tracking_status: DataFrame containing the QA master tracking status for the hunter survey data.
+    - spatial_fl_id: AGO item ID for the hunter survey feature layer.
+
+    Returns:
+    - None  
+    """ 
+
+    #logging.info(f'\nSelecting Records to Update in Hunter Survey FL' )
+    ## NOTE - may need to update/default all records, once a check is reviewed?  Will Flag status change? TBD
+    #updated_df = df_hs[(df_hs['QA_HUNTER_DETAILS_FLAG'] == 'Check') | (df_hs['QA_HUNTER_DETAILS_FLAG'] == 'No Sampling Match')]
+    #updated_df = df_hs[(df_hs['QA_HUNTER_SURVEY_FLAG'] != 'Matched')]
+    #print('Records to Revise:  ',len(updated_df))
+    
+    #print('Records to Revise:  ',len(df_hs))
+
+    
+    cols = [
+    "SAMPLING_SESSION_ID",
+    "WLH_ID",
+    "HUNTER_CWD_EAR_CARD_ID_TEXT",
+    "HUNTER_CWD_EAR_CARD_ID",
+    "QA_HUNTER_EARCARD_DUPLICATE",
+    "QA_HUNTER_SURVEY_FLAG",
+    "QA_HUNTER_SURVEY_FLAG_DESC",
+    "QA_HUNTER_SURVEY_REVIEW_STATUS",
+    "QA_HUNTER_SURVEY_REVIEW_COMMENTS",
+    ]   
+    updated_df = df_hs[cols]
+    print('Hunter Survey Records to Revise :  ',len(updated_df))
+    
+    
+    ##### Use Pandas Dataframes to update AGO Layers
+    ## get spatial features from AGO
+    hunter_survey_item = gis.content.get(spatial_fl_id)
+    hs_lyr = hunter_survey_item.layers[0]
+    hs_fset = hs_lyr.query()
+    hs_features = hs_fset.features
+    hs_sdf = hs_fset.sdf
+    #print(hs_sdf)
+    print('Records in Hunter Survey Layer:  ',len(hs_sdf))
+    
+
+    uCount = 0   #initiate counter
+
+    logging.info('Updating the AGO Hunter Survey Feature Layer with the latest QA Flags...please be patient')
+    # Update the Feature Layer with the QA flags for matching records.  
+    # This may overwrite existing values in the FL with the new qa values.  That is ok.
+    uCount = 0   #initiate counter
+    fl_sum_fld = 'HUNTER_CWD_EAR_CARD_ID'
+    df_sum_fld = 'HUNTER_CWD_EAR_CARD_ID'
+    for ROW_ID in updated_df[fl_sum_fld]:
+        try:
+            upd_feature = [f for f in hs_features if f.attributes[fl_sum_fld] == ROW_ID][0]  #get the spatial feature
+            upd_row = updated_df.loc[updated_df[df_sum_fld] == ROW_ID]   #get the dataframe row
+            upd_val_1 = upd_row['QA_HUNTER_SURVEY_FLAG'].values[0]
+            upd_val_2 = upd_row['QA_HUNTER_SURVEY_FLAG_DESC'].values[0]
+            upd_val_3 = upd_row['QA_HUNTER_EARCARD_DUPLICATE'].values[0]
+            #print(upd_val)
+            upd_feature.attributes['QA_HUNTER_SURVEY_FLAG'] = str(upd_val_1)
+            upd_feature.attributes['QA_HUNTER_SURVEY_FLAG_DESC'] = str(upd_val_2)
+            upd_feature.attributes['QA_HUNTER_EARCARD_DUPLICATE'] = str(upd_val_3)
+            #upd_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
+            hs_lyr.edit_features(updates=[upd_feature])
+            #print(f"Updated {upd_feature.attributes[fl_sum_fld]} sample count to {upd_val} at {timenow_rounded}", flush=True)
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update {ROW_ID}. Exception: {e}")
+            continue
+    logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the new QA Flags for:  {uCount} records.')
+
+
+    logging.info('Updating the AGO Hunter Survey Feature Layer with the latest QA tracking review status and comments ...')
+    """# filter df for where there are review status /comments
+    df_tracking_status_select = df_tracking_status[
+        (df_tracking_status['QA_HUNTER_SURVEY_REVIEW_STATUS'].notna() & df_tracking_status['QA_HUNTER_SURVEY_REVIEW_STATUS'].str.strip() != '') |
+        (df_tracking_status['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].notna() & df_tracking_status['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].str.strip() != '')
+        ]
+    
+    print(f"{len(df_tracking_status_select)}... records found for Hunter Survey review tracking... of a total of {df_tracking_status} flagged records\n")
+    """
+    
+    # Update the Feature Layer with the QA flags for matching records
+    # Use all records in the df_tracking_status, without any filter, in order to update with any revised review status or comments.
+    uCount = 0   #initiate counter
+    for ROW_ID in df_tracking_status[fl_sum_fld]:
+        try:
+            upd_feature = [f for f in hs_features if f.attributes[fl_sum_fld] == ROW_ID][0]  #get the spatial feature
+            upd_row = df_tracking_status.loc[df_tracking_status[df_sum_fld] == ROW_ID]   #get the dataframe row
+            upd_val_1 = upd_row['QA_HUNTER_SURVEY_REVIEW_STATUS'].values[0]
+            upd_val_2 = upd_row['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].values[0]
+            upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_STATUS'] = str(upd_val_1)
+            upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_COMMENTS'] = str(upd_val_2)
+            hs_lyr.edit_features(updates=[upd_feature])
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update {ROW_ID}. Exception: {e}")
+            continue
+    logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the Review Status and Comments for:  {uCount} records.')
+
+    return
+
+def find_and_save_duplicates(df, fld, output_path):
+    """
+    Finds duplicate field values (e.g. CWD_EAR_CARD_ID) in a DataFrame and saves them to an Excel report.
+    
+    Parameters:
+    - df: DataFrame containing the data to be checked.
+    - fld: Name of the field to check for duplicates.
+    - output_path: Path to save the Excel report.
+    
+    Returns:
+    - DataFrame containing the duplicate records, not including null fld values.
+    """
+    
+    # Exclude null values
+    df_non_null = df[df[fld].notna()]
+
+    # Find duplicate values
+    duplicate_mask = df_non_null.duplicated(subset= fld, keep=False)
+    duplicate_df = df_non_null[duplicate_mask]
+    
+    # Sort by fld
+    duplicate_df = duplicate_df.sort_values(by=fld)
+
+    # Save the duplicate values to an Excel report
+    if not duplicate_df.empty:
+        save_xlsx_to_os(s3_client, 'whcwdd', duplicate_df, output_path)
+        #print(f"Duplicate values saved to {output_path}")
+    else:
+        print(f"No duplicate values found for {fld}")
+    
+    return duplicate_df
+
+
+
+def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, latcol):
+    """
+    Flags points where the sampling MU or Region does not match the spatial MU or Region.
+    Note that there may be cases where the point is very close to a Region or MU border.
+    
+    This is only be for records where the MAP_SOURCE_DESCRIPTOR is Hunter Survey or From Submitter i.e. not for centroid based locations.
+
+    Add new fields to the master xls and FL for QA checks - QA_REG_WMU_CHECK, (QA_REG_WMU_CHECK_DATE_TIME)
+    """
+    # convert MU and Region feature layers to geodataframes
+    mu_gdf = gpd.GeoDataFrame(mu_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['WILDLIFE_MGMT_UNIT_ID', 'SHAPE']]
+    rg_gdf = gpd.GeoDataFrame(rg_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['REGION_NAME', 'SHAPE']]
+
+    
+    df_length = len(df_wh)
+    df = df_wh.dropna(subset=[latcol, longcol])
+    # filter for specific records from Hunter Survey or Submitter - i.e. based on specific lat/longs, not centroids.
+    df_select = df[(df['MAP_SOURCE_DESCRIPTOR'] == 'Hunter Survey') | (df['MAP_SOURCE_DESCRIPTOR'] == 'From Submitter')]
+    
+    print(f"\t{len(df_select)}... records found for Hunter or Submitter locations... of a total of {df_length} sampling records")
+    
+    # Calc / Recalc default values for QA Checks - overwrites previous values.
+    df_select['QA_REG_WMU_CHECK'] = ''
+    df_select['QA_REG_WMU_CHECK_DATE_TIME'] = current_datetime
+    # Add empty tracking columns for WH Team.  These are not published to the AGO FL, currently.
+    df_select[['QA_REG_WMU_CHECK_STATUS','QA_REG_WMU_CHECK_COMMENTS']] = ''
+
+    # convert df to geodataframe
+    gdf = gpd.GeoDataFrame(df_select, geometry=gpd.points_from_xy(df_select[longcol], df_select[latcol]), crs="EPSG:4326")
+
+    # spatial join the mu and region dataframes to the geodataframe
+    logging.info("..performing spatial join")
+    sjoin_mu_gdf = gpd.sjoin(gdf, mu_gdf, how='left', op='within', lsuffix='left', rsuffix='right')
+
+    # drop the index column to prep for the next spatial join
+    sjoin_mu_gdf = sjoin_mu_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
+
+    sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', op='within', lsuffix='left', rsuffix='right')
+
+
+    # compare columns and update flags
+    logging.info("..updating flags")
+
+     # Where there are sampling blanks - populate sampling Region/MU w/ values from the spatial join?
+     # or just keep in the spatial columns.  WMU_SPATIAL, ENV_REGION_SPATIAL
+    """ 
+    sjoin_gdf['WMU'] = sjoin_gdf['WMU'].fillna(sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'])
+    sjoin_gdf['ENV_REGION_NAME'] = sjoin_gdf['ENV_REGION_NAME'].fillna(sjoin_gdf['REGION_NAME'])
+    """
+
+    ##DOUBLE CHECK - are missing MUs from Ear Card filled in in the spatial column?
+    
+    # Flag records where the Region does not match the spatial Region
+    sjoin_gdf['QA_REG_WMU_CHECK'] = np.where((sjoin_gdf['REGION_NAME'].notna()) & (sjoin_gdf['ENV_REGION_NAME'].notna()) &
+                                                    (sjoin_gdf['REGION_NAME'] != sjoin_gdf['ENV_REGION_NAME']),
+                                                    'REG',
+                                                    sjoin_gdf['QA_REG_WMU_CHECK'])
+    
+    # Flag records where the MU does not match the spatial MU
+    sjoin_gdf['QA_REG_WMU_CHECK'] = np.where((sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'].notna()) & (sjoin_gdf['WMU'].notna()) & 
+                                                    (sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'] != sjoin_gdf['WMU']),
+                                                    sjoin_gdf['QA_REG_WMU_CHECK'].fillna('') + ', WMU',
+                                                    sjoin_gdf['QA_REG_WMU_CHECK'])
+    
+    # Update QA_REG_WMU_CHECK if there are hanging commas
+    def update_error_desc(desc):
+        if pd.isna(desc):
+            return desc
+        return desc.lstrip(", ")
+    sjoin_gdf['QA_REG_WMU_CHECK'] = sjoin_gdf['QA_REG_WMU_CHECK'].apply(update_error_desc)
+
+    
+    # drop joined columns
+    # sjoin_df = sjoin_gdf.drop(['geometry', 'index_left', 'index_right', 'WILDLIFE_MGMT_UNIT_ID', 'REGION_NAME'], axis=1, errors='ignore')
+    sjoin_df = sjoin_gdf.drop(['geometry', 'index_left', 'index_right'], axis=1, errors='ignore')
+
+    """
+    # append the rows with Unknown locations back to the dataframe
+    unknown_df = df[df['MAP_SOURCE_DESCRIPTOR'].isin(['Region Centroid', 'MU Centroid', 'Unknown'])]
+    sjoin_df = pd.concat([sjoin_df, unknown_df], ignore_index=True)
+    """
+
+    # Rename spatial columns
+    sjoin_df = sjoin_df.rename(columns={
+        'WILDLIFE_MGMT_UNIT_ID': 'WMU_SPATIAL',
+        'REGION_NAME': 'ENV_REGION_SPATIAL'
+    })
+
+    #Get select columns
+    cols = [
+        "SAMPLING_LEAD_FULL_NAME",
+        "SAMPLING_CITY_LOCATION",
+        "SAMPLING_SESSION_ID",
+        "CWD_LAB_SUBMISSION_ID",
+        "FISCAL_YEAR",
+        "WLH_ID",
+        "CWD_EAR_CARD_ID",
+        "DROPOFF_LOCATION",
+        "LATITUDE_DD",
+        "LONGITUDE_DD",
+        "SPATIAL_CAPTURE_DESCRIPTOR",
+        "HUNTER_LATITUDE_DD",
+        "HUNTER_LONGITUDE_DD",
+        "MAP_LATITUDE",
+        "MAP_LONGITUDE",
+        "MAP_SOURCE_DESCRIPTOR",
+        "ENV_REGION_NAME",
+        "ENV_REGION_SPATIAL",
+        "WMU",
+        "WMU_SPATIAL",
+        "QA_REG_WMU_CHECK",
+        "QA_REG_WMU_CHECK_DATE_TIME",
+        "QA_REG_WMU_CHECK_STATUS",
+        "QA_REG_WMU_CHECK_COMMENTS",
+        "GIS_LOAD_VERSION_DATE",
+        "COLLECTION_DATE",
+        "IDENTIFIER_TYPE",
+        "IDENTIFIER_ID",
+        "SPECIES",
+        "SEX",
+        "AGE_CLASS",
+        "AGE_ESTIMATE",
+        "MORTALITY_CAUSE",
+        "MORTALITY_DATE",
+        "SUBMITTER_TYPE",
+        "SUBMITTER_FIRST_NAME",
+        "SUBMITTER_LAST_NAME",
+        "SUBMITTER_PHONE",
+        "FWID",
+        "SAMPLED_DATE",
+        "SAMPLED_IND",
+        "CWD_SAMPLED_IND",
+        "CWD_TEST_STATUS",
+        "CWD_TEST_STATUS_DATE",
+        "HUNTER_CWD_EAR_CARD_ID",
+        "HUNTER_MORTALITY_DATE",
+        "HUNTER_SPECIES",
+        "HUNTER_SEX",
+        "HUNTER_SUBMIT_DATE_TIME"
+        ]    
+  
+    
+    #Re-orders the columns, as listed above. Then sort.
+    mu_reg_flagged = sjoin_df[cols]
+    #mu_reg_flagged = mu_reg_flagged.sort_values(by=['QA_REG_FLAG','QA_WMU_FLAG'])
+
+    # How many flagged?
+    #mu_reg_flagged = mu_reg_flagged[(mu_reg_flagged['QA_REG_FLAG'] == 'Check ENV REGION Survey') | (mu_reg_flagged['QA_WMU_FLAG'] == 'Check WMU')]
+    mu_reg_flagged = mu_reg_flagged[(mu_reg_flagged['QA_REG_WMU_CHECK'] != '')]
+    print(f"\t{len(mu_reg_flagged)}... records found for Flagged REGION or WMU mistmatches from Hunter or Submitter... of a total of {df_length} sampling records\n")
+
+    
+    # convert WMU column to string
+    mu_reg_flagged['WMU'] = mu_reg_flagged['WMU'].astype(str)
+    mu_reg_flagged['WMU_SPATIAL'] = mu_reg_flagged['WMU_SPATIAL'].astype(str)
+
+    # sort
+    mu_reg_flagged = mu_reg_flagged.sort_values(by=['WLH_ID'])
+
+    # Export list to XLS to overwrite master tracking xls
+    save_xlsx_to_os(s3_client, 'whcwdd', mu_reg_flagged, f'qa/mu_reg_checks/bck/cwd_master_mu_region_checks_{current_datetime_str}.xlsx')
+    # TEMP - to create inital master tracking xls.
+    #save_xlsx_to_os(s3_client, 'whcwdd', mu_reg_flagged, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+
+    # Add QA_REG_WMU_CHECK to master sampling df
+    df_wh = df_wh.merge(mu_reg_flagged[['WLH_ID','QA_REG_WMU_CHECK']], on='WLH_ID', how='left')
+    df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')   #Move to last column
+    
+    return df_wh, mu_reg_flagged
+
+def update_sampling_mu_reg_review_tracking_list(flagged_df):
+
+    """
+    Reads the existing master sampling tracking xls file into a dataFrame, reads flagged QA_REG_WMU_CHECK records , 
+    compares the records, and appends new records based on WLH_ID to the master tracking dataFrame.
+
+    This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
+    This lets the team see what the original QA flags were, and what changes were made to the records.
+    
+    Parameters:
+    - flagged_df: DataFrame containing the flagged hunter survey records.
+    
+    Outputs: (none)
+    - updated_tracking_df:  Updated static master tracking sheet with newly flagged qa records appended.
+    """
+
+    # Read the static master XLS file into a DataFrame
+    static_xls_path = 'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx'
+    logging.info(f"...reading file: {static_xls_path}")
+    obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+    data = obj['Body'].read()
+    excel_file = pd.ExcelFile(BytesIO(data))
+
+    static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
+
+    # Compare records and append new flagged hunter survey records to the static DataFrame
+    new_records = flagged_df[~flagged_df['WLH_ID'].isin(static_df['WLH_ID'])]
+    
+    print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
+    
+    # Ensure both DataFrames have the same columns and data types
+    """print("Column Types static_df:")
+    print(static_df.dtypes)
+    print("Column Types new_records:")
+    print(new_records.dtypes)
+    """
+    
+    """new_records = new_records.reindex(columns=static_df.columns)
+    for col in static_df.columns:
+        if col in new_records.columns:
+            new_records[col] = new_records[col].astype(static_df[col].dtype)
+        else:
+            print(f"Column {col} not found in new_records")"""
+
+    # Append new records to the static DataFrame
+    tracking_df = pd.concat([static_df, new_records], ignore_index=True)
+
+    # Fill nan values with empty strings
+    tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']] = tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']].fillna('')
+    #replace Not a Time (NaT) for entire dataframe
+    tracking_df = tracking_df.replace(['NaT'], '')
+
+    # Sort the DataFrame
+    tracking_df = tracking_df.sort_values(by=['WLH_ID'])
+
+    # Overwrite to xls
+    logging.info("..saving the revised tracking list to xls")
+    #print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... added to {len(static_df)} existing records\n")
+    save_xlsx_to_os(s3_client, 'whcwdd', tracking_df, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+
+    return
+
+def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_features, summ_zones_sdf):
+    """
+    Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MOE Region
+    Export to excel.
+    Update values in AGO.
+    """ 
+
+    logging.info(f'\nSummarizing Data by...{df_sum_fld} and joining to the AGO Feature Layer' )
+    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+    print('CWD_SAMPLED_IND = Yes:  ',len(df_sampled))
+
+
+    # Filter columns to include
+    df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND']]
+    #Group by the spatial unit field and count the number of samples
+    df_unit_count = df_unit_sampled.groupby(df_sum_fld)['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
+    df_unit_count = df_unit_count.sort_values(by=[df_sum_fld])
+    #Add a field to store the GIS_LOAD_VERSION_DATE
+    df_unit_count['GIS_LOAD_VERSION_DATE'] = current_datetime
+    #print(f'Number of summary units with sampled data for {df_sum_fld}: {df_unit_count}')
+
+    ## Save the summary to a file in object storage
+    logging.info('\nSaving the TEST summary')
+    bucket_name='whcwdd'
+    summary_file_name = (df_sum_fld.lower()) +'_rollup_summary.xlsx'
+    save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/spatial_rollup/'+summary_file_name)
+    
+
+    # find rows in sampling summary that don't have a spatial unit match.  These are probably due to data entry errors.
+    df_mismatch_errors = df_unit_count[~df_unit_count[df_sum_fld].isin(summ_zones_sdf[fl_sum_fld])]
+    print('\nCHECK DATA: The following unit(s) do not exist in the spatial data:  \n',df_mismatch_errors)
+    mismatch_file_name = 'no_spatial_match_'+ (df_sum_fld.lower()) +'.xlsx'
+    save_xlsx_to_os(s3_client, 'whcwdd', df_mismatch_errors, 'qa/mu_reg_checks/'+mismatch_file_name)
+
+    # find overlapping rows
+    print(f"\nChecking for intersecting rows based on {df_sum_fld}/{fl_sum_fld}...this could take awhile...")
+    overlap_rows = pd.merge(left = summ_zones_sdf, right = df_unit_count, how='inner', left_on = fl_sum_fld , right_on = df_sum_fld)
+    rcount = len(overlap_rows)
+    #rcount = overlap_rows.count()
+    print(f'Number of Intersecting Rows: {rcount}')
+    #print(overlap_rows)
+
+    
+    #Update cursor using the summary df directly (vs converting it to a hosted table in AGO)
+    #First, set default Feature Layer rollup to 0 and the current date/time
+    uCount = 0
+    print("\nCalculating default values for Feature Layer...this could take awhile...")
+    for feature in summ_zones_features:
+        try:
+            feature.attributes['CWD_SAMPLE_COUNT'] = 0
+            feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded
+            summ_zones_lyr.edit_features(updates=[feature])
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update Feature Layer with default values. Exception: {e}")
+            print('\nExiting...\n')
+            sys.exit()
+            #continue
+
+    print("DONE Calculating default values for ",uCount, " records!")
+    
+    
+
+    logging.info('Updating the AGO Feature Layer with the summary data...')
+    #Then update the Feature Layer with the summary data for matching records
+    uCount = 0   #reset counter
+    for UNIT_ID in overlap_rows[fl_sum_fld]:
+        try:
+            summ_feature = [f for f in summ_zones_features if f.attributes[fl_sum_fld] == UNIT_ID][0]  #get the spatial feature
+            summary_row = df_unit_count.loc[df_unit_count[df_sum_fld] == UNIT_ID]#,['Sample_Count']] #get the dataframe summary row
+            summary_val = summary_row['Sample_Count'].values[0]  #get the sample count value
+            #print(summary_val)
+            summ_feature.attributes['CWD_SAMPLE_COUNT'] = str(summary_val)
+            #summ_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
+            summ_zones_lyr.edit_features(updates=[summ_feature])
+            #print(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}", flush=True)
+            uCount = uCount + 1
+        except Exception as e:
+            print(f"Could not update {UNIT_ID}. Exception: {e}")
+            continue
+
+    #print("\nDONE updating ",uCount, " records!")
+    logging.info(f'DONE updating the AGO Feature Layer with the summary data for:  {uCount} records.')
+
 
 
 def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str):
@@ -558,79 +1302,25 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
             except Exception as e:
                 logging.error(f"..an error occurred while saving {file_key}: {e}")
 
-
-
-def save_spatial_files(df, s3_client, bucket_name):
+def backup_master_dataset(s3_client, bucket_name):
     """
-    Saves spatial files of the master datasets in object storage
+    Creates a backup of the Master dataset
     """
-    latcol='MAP_LATITUDE'
-    loncol= 'MAP_LONGITUDE'
-
-    df = df.dropna(subset=[latcol, loncol])
-    df = df.astype(str)
-
     pacific_timezone = pytz.timezone('America/Vancouver')
-    dytm = datetime.now(pacific_timezone).strftime("%Y%m%d")
+    yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
+    dytm = yesterday.strftime("%Y%m%d")
+    source_file_path = 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx'
+    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset_sampling_w_hunter.xlsx'
     
-    # Create a GeoDataFrame from the DataFrame
-    gdf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.points_from_xy(df[loncol], df[latcol]),
-        crs="EPSG:4326"
-    )
-    
-    #save the KML
     try:
-        import fiona
-        fiona.supported_drivers['KML'] = 'rw'
-
-        # Convert GeoDataFrame to KML
-        kml_buffer = BytesIO()
-        gdf.to_file(kml_buffer, driver='KML')
-        kml_buffer.seek(0)
-
-        # Define the S3 object key
-        s3_kml_key = f"spatial/{dytm}_cwd_sampling_points.kml"
-        
-        # Upload the KML file to S3
-        s3_client.put_object(Bucket=bucket_name, Key=s3_kml_key, Body=kml_buffer, 
-                             ContentType='application/vnd.google-earth.kml+xml')
-        
-        logging.info(f"..KML file saved to {bucket_name}/{s3_kml_key}")
-        
+        s3_client.copy_object(
+            Bucket=bucket_name,
+            CopySource={'Bucket': bucket_name, 'Key': source_file_path},
+            Key=destination_file_path
+        )
+        logging.info("..old master dataset backed-up successfully")
     except Exception as e:
-        logging.error(f"..failed to save or upload KML file: {e}")
-
-    #save the shapefile
-    try:
-        import zipfile
-        import tempfile
-
-        shapefile_buffer = BytesIO()
-        with zipfile.ZipFile(shapefile_buffer, 'w') as zf:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                shapefile_path = os.path.join(tmpdir, "{dytm}_cwd_sampling_points.shp")
-                gdf.to_file(shapefile_path, driver='ESRI Shapefile')
-
-                # Add all shapefile components to the zip archive
-                for filename in os.listdir(tmpdir):
-                    file_path = os.path.join(tmpdir, filename)
-                    zf.write(file_path, os.path.basename(file_path))
-
-        shapefile_buffer.seek(0)
-
-        # Define the S3 object key for Shapefile
-        s3_shapefile_key = f"spatial/{dytm}_cwd_sampling_points.zip"
-
-        # Upload the Shapefile (zipped) to S3
-        s3_client.put_object(Bucket=bucket_name, Key=s3_shapefile_key, Body=shapefile_buffer, 
-                             ContentType='application/zip')
-
-        logging.info(f"..shapefile saved to {bucket_name}/{s3_shapefile_key}")
-
-    except Exception as e:
-        logging.error(f"..failed to save or upload the shapefile: {e}")        
+        logging.info(f"..an error occurred: {e}")
 
 
 def publish_feature_layer(gis, df, latcol, longcol, title, folder):
@@ -843,92 +1533,79 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     else:
         logging.info("..failed to update field properties. Response:", response)
 
-def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, spatial_fl_id):
+
+def test_save_spatial_files(df, s3_client, bucket_name):
     """
-    Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MOE Region
-    """ 
+    TEST Saves spatial files of the master datasets in object storage
+    """
+    latcol='MAP_LATITUDE'
+    loncol= 'MAP_LONGITUDE'
 
-    logging.info(f'\nSummarizing Data by...{df_sum_fld} and joining to the AGO Feature Layer' )
-    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
-    print('CWD_SAMPLED_IND = Yes:  ',len(df_sampled))
+    df = df.dropna(subset=[latcol, loncol])
+    df = df.astype(str)
 
-
-    # Filter columns to include
-    df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND']]
-    #Group by the spatial unit field and count the number of samples
-    df_unit_count = df_unit_sampled.groupby(df_sum_fld)['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
-    df_unit_count = df_unit_count.sort_values(by=[df_sum_fld])
-    print(f'Number of summary units with sampled data for {df_sum_fld}: {df_unit_count}')
-
-    ## Save the summary to a file in object storage - for initial testing
-    logging.info('\nSaving the TEST summary')
-    bucket_name='whcwdd'
-    summary_file_name = df_sum_fld+'_rollup_summary.xlsx'
-    save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/rollup_test/'+summary_file_name)
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    dytm = datetime.now(pacific_timezone).strftime("%Y%m%d")
     
+    # Create a GeoDataFrame from the DataFrame
+    gdf = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df[loncol], df[latcol]),
+        crs="EPSG:4326"
+    )
     
-    ##### Use Pandas Dataframes to update AGO Layers
-    ## get spatial features from AGO
-    summ_zones = gis.content.get(spatial_fl_id)
-    summ_zones_lyr = summ_zones.layers[0]
-    summ_zones_fset = summ_zones_lyr.query()
-    summ_zones_features = summ_zones_fset.features
-    summ_zones_sdf = summ_zones_fset.sdf
-    #print(summ_zones_sdf)
+    #save the KML
+    try:
+        import fiona
+        fiona.supported_drivers['KML'] = 'rw'
 
-    # find  rows in sampling summary that don't have a spatial unit match.  These are probably due to data entry errors.
-    df_mismatch_errors = df_unit_count[~df_unit_count[df_sum_fld].isin(summ_zones_sdf[fl_sum_fld])]
-    print('\nCHECK DATA: The following unit(s) do not exist in the spatial data:  \n',df_mismatch_errors)
+        # Convert GeoDataFrame to KML
+        kml_buffer = BytesIO()
+        gdf.to_file(kml_buffer, driver='KML')
+        kml_buffer.seek(0)
 
-    # find overlapping rows
-    print(f"\nChecking for intersecting rows based on {df_sum_fld}/{fl_sum_fld}...this could take awhile...")
-    overlap_rows = pd.merge(left = summ_zones_sdf, right = df_unit_count, how='inner', left_on = fl_sum_fld , right_on = df_sum_fld)
-    rcount = len(overlap_rows)
-    #rcount = overlap_rows.count()
-    print(f'Number of Intersecting Rows: {rcount}')
-    #print(overlap_rows)
+        # Define the S3 object key
+        s3_kml_key = f"spatial/{dytm}_cwd_sampling_points.kml"
+        
+        # Upload the KML file to S3
+        s3_client.put_object(Bucket=bucket_name, Key=s3_kml_key, Body=kml_buffer, 
+                             ContentType='application/vnd.google-earth.kml+xml')
+        
+        logging.info(f"..KML file saved to {bucket_name}/{s3_kml_key}")
+        
+    except Exception as e:
+        logging.error(f"..failed to save or upload KML file: {e}")
 
-    
-    #Update cursor using the summary df directly (vs converting it to a hosted table in AGO)
-    #First, set default Feature Layer rollup to 0 and the current date/time
-    uCount = 0
-    print("\nCalculating default values for Feature Layer...this could take awhile...")
-    for feature in summ_zones_features:
-        try:
-            feature.attributes['CWD_SAMPLE_COUNT'] = 0
-            feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded
-            summ_zones_lyr.edit_features(updates=[feature])
-            uCount = uCount + 1
-        except Exception as e:
-            print(f"Could not update Feature Layer with default values. Exception: {e}")
-            print('\nExiting...\n')
-            sys.exit()
-            #continue
+    #save the shapefile
+    try:
+        import zipfile
+        import tempfile
 
-    print("DONE Calculating default values for ",uCount, " records!")
-    
-    uCount = 0   #reset counter
+        shapefile_buffer = BytesIO()
+        with zipfile.ZipFile(shapefile_buffer, 'w') as zf:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                shapefile_path = os.path.join(tmpdir, "{dytm}_cwd_sampling_points.shp")
+                gdf.to_file(shapefile_path, driver='ESRI Shapefile')
 
-    logging.info('Updating the AGO Feature Layer with the summary data...')
-    #Then update the Feature Layer with the summary data for matching records
-    for UNIT_ID in overlap_rows[fl_sum_fld]:
-        try:
-            summ_feature = [f for f in summ_zones_features if f.attributes[fl_sum_fld] == UNIT_ID][0]  #get the spatial feature
-            summary_row = df_unit_count.loc[df_unit_count[df_sum_fld] == UNIT_ID]#,['Sample_Count']] #get the dataframe summary row
-            summary_val = summary_row['Sample_Count'].values[0]  #get the sample count value
-            #print(summary_val)
-            summ_feature.attributes['CWD_SAMPLE_COUNT'] = str(summary_val)
-            #summ_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
-            summ_zones_lyr.edit_features(updates=[summ_feature])
-            #print(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}", flush=True)
-            uCount = uCount + 1
-        except Exception as e:
-            print(f"Could not update {UNIT_ID}. Exception: {e}")
-            continue
+                # Add all shapefile components to the zip archive
+                for filename in os.listdir(tmpdir):
+                    file_path = os.path.join(tmpdir, filename)
+                    zf.write(file_path, os.path.basename(file_path))
 
-    #print("\nDONE updating ",uCount, " records!")
-    logging.info(f'DONE updating the AGO Feature Layer with the summary data for:  {uCount} records.')
+        shapefile_buffer.seek(0)
 
+        # Define the S3 object key for Shapefile
+        s3_shapefile_key = f"spatial/{dytm}_cwd_sampling_points.zip"
+
+        # Upload the Shapefile (zipped) to S3
+        s3_client.put_object(Bucket=bucket_name, Key=s3_shapefile_key, Body=shapefile_buffer, 
+                             ContentType='application/zip')
+
+        logging.info(f"..shapefile saved to {bucket_name}/{s3_shapefile_key}")
+
+    except Exception as e:
+        logging.error(f"..failed to save or upload the shapefile: {e}")       
+        
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
 
@@ -946,28 +1623,69 @@ if __name__ == "__main__":
     AGO_PASSWORD = os.getenv('AGO_PASSWORD')
     gis = connect_to_AGO(AGO_HOST, AGO_USERNAME, AGO_PASSWORD)
     
+    #Set current date/time and as a string value to use later in file names.
+    pacific_timezone = pytz.timezone('America/Vancouver')
+    current_datetime = datetime.now(pacific_timezone).strftime('%Y-%m-%d %H:%M:%S')
+    current_datetime_str = datetime.now(pacific_timezone).strftime('%Y%m%d_%H%M%S%p')
+    current_datetime_str = current_datetime_str.lower()
+    timenow_rounded = datetime.now().astimezone(pacific_timezone)
+    today = datetime.today().strftime('%Y%m%d')
+
     if s3_client:
         logging.info('\nRetrieving Incoming Data from Object Storage')
         df = get_incoming_data_from_os(s3_client)
         
-        logging.info('\nRetrieving Lookup Tables from Object Storage')
+        logging.info('\nRetrieving Centroid CSV Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
-      
-    logging.info('\nProcessing the Master dataset')
+
+    
+    logging.info('\nGetting Hunter Survey Data from AGOL')
+    # Using Featire Layer ID is more reliable than the Name, which can be amiguous.
+    #AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
+    AGO_HUNTER_ITEM_ID = '107b4486f0674f0e8837f0745e49c194'  
+    hunter_df = get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID)
+    
+    logging.info('\nGetting MU and Region data from AGOL Feature Layers')
+    mu_flayer_lyr, mu_flayer_fset, mu_features, mu_flayer_sdf = get_ago_flayer('0b81e46151184058a88c701853e09577')
+    rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
+
+    
+    #----------------------------------------------------
+    logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
 
-    logging.info('\nGetting Hunter Survey Data from AGOL')
-    AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
-    hunter_df = get_hunter_data_from_ago(gis, AGO_HUNTER_ITEM)
     
-    logging.info('\nAdding hunter data to Master dataset')
-    df_wh= add_hunter_data_to_master(df, hunter_df)
+    logging.info('\nAdding hunter survey (hs) data to Master sampling dataset')
+    df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, hunter_df)
+
+    logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
+    updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
+
+    logging.info('\nUpdating the AGO Hunter Survey Feature Layer with the latest QA flags')
+    update_hunter_flags_to_ago(hs_merged_df, updated_tracking_df, AGO_HUNTER_ITEM_ID)
 
 
-    logging.info('\nInitiating .... Saving an XLSX for the webpage')
-    #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
-    #folder = 'Web/'       # this points to BCBOX
-    #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
+    logging.info('\nFinding and saving duplicate CWD_EAR_CARD_IDs and WLH_IDs in Hunter data and Sampling data. ')
+    find_and_save_duplicates(hs_merged_df,'HUNTER_CWD_EAR_CARD_ID', f'qa/duplicate_ids/cwd_hunter_survey_ear_card_id_duplicates.xlsx')
+    find_and_save_duplicates(df_wh,'CWD_EAR_CARD_ID', f'qa/duplicate_ids/cwd_master_sampling_ear_card_id_duplicates.xlsx')
+    find_and_save_duplicates(df_wh,'WLH_ID', f'qa/duplicate_ids/cwd_master_sampling_wh_id_duplicates.xlsx')
+
+
+    logging.info('\nChecking for mismatches between entered MU and Region and spatial location')
+    df_wh, mu_reg_flagged = check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, 'MAP_LONGITUDE', 'MAP_LATITUDE')
+
+    logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
+    update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
+
+    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
+    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
+    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
+
+ 
+    # logging.info('\nInitiating .... Saving an XLSX for the webpage')
+    # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBO#
+    # #folder = 'Web/'       # this points to BCBOX
+    # #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
 
     bucket_name= 'whcwdd' # this points to BGeoDrive
     folder= 'share_web/' # this points to GeoDrive
@@ -986,15 +1704,13 @@ if __name__ == "__main__":
     logging.info('\nSaving the Master Dataset')
     bucket_name='whcwdd'
     backup_master_dataset(s3_client, bucket_name) #backup
-    #save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
+    ##save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
 
     
-    #print('\nExiting...\n')
-    #sys.exit()
-    
+    #TESTING
     #logging.info('\nSaving spatial data')
-    #save_spatial_files(df_wh, s3_client, bucket_name)
+    #test_save_spatial_files(df_wh, s3_client, bucket_name)
 
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
@@ -1007,10 +1723,6 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
-    logging.info(f'\nSummarizing Data by spatial units.' )
-    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', '0b81e46151184058a88c701853e09577')
-    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', '118379ce29f94faeaa724d2055ea235c')
-
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
