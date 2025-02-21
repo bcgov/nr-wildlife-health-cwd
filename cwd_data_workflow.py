@@ -44,6 +44,7 @@ from pytz import timezone
 from datetime import datetime, timedelta
 
 
+
 def connect_to_os(ENDPOINT, ACCESS_KEY, SECRET_KEY):
     """
     Returns a connection to Object Storage
@@ -854,12 +855,12 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
 
     # spatial join the mu and region dataframes to the geodataframe
     logging.info("..performing spatial join")
-    sjoin_mu_gdf = gpd.sjoin(gdf, mu_gdf, how='left', op='within', lsuffix='left', rsuffix='right')
+    sjoin_mu_gdf = gpd.sjoin(gdf, mu_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
 
     # drop the index column to prep for the next spatial join
     sjoin_mu_gdf = sjoin_mu_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
 
-    sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', op='within', lsuffix='left', rsuffix='right')
+    sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
 
 
     # compare columns and update flags
@@ -1022,19 +1023,22 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
     
     print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
     
+    new_records = new_records.reset_index()
+
     # Ensure both DataFrames have the same columns and data types
-    """print("Column Types static_df:")
-    print(static_df.dtypes)
-    print("Column Types new_records:")
-    print(new_records.dtypes)
-    """
+    static_df['QA_REG_WMU_CHECK_STATUS'] = static_df['QA_REG_WMU_CHECK_STATUS'].astype(object)
+    static_df['QA_REG_WMU_CHECK_COMMENTS'] = static_df['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
+
+    new_records['QA_REG_WMU_CHECK_STATUS'] = new_records['QA_REG_WMU_CHECK_STATUS'].astype(object)
+    new_records['QA_REG_WMU_CHECK_COMMENTS'] = new_records['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
     
-    """new_records = new_records.reindex(columns=static_df.columns)
     for col in static_df.columns:
         if col in new_records.columns:
+            #print(f"\tColumn {col} found: {static_df[col].dtype} ... {new_records[col].dtype}")
             new_records[col] = new_records[col].astype(static_df[col].dtype)
         else:
-            print(f"Column {col} not found in new_records")"""
+            print(f"Column {col} NOT found in new_records")
+    
 
     # Append new records to the static DataFrame
     tracking_df = pd.concat([static_df, new_records], ignore_index=True)
@@ -1114,7 +1118,6 @@ def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_f
             #continue
 
     print("DONE Calculating default values for ",uCount, " records!")
-    
     
 
     logging.info('Updating the AGO Feature Layer with the summary data...')
