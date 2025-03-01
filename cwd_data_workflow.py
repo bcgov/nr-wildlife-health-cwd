@@ -639,6 +639,8 @@ def update_hs_review_tracking_list(flagged_hs_df):
     This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
     This lets the team see what the original QA flags were, and what changes were made to the records.
     
+    NOTE:  28-Feb-2025 - there is a glitch in S3 storage where the file is disappearing.  Trying to resolve this with the help desk.
+
     Parameters:
     - flagged_hs_df: DataFrame containing the flagged hunter survey records.
     
@@ -648,47 +650,61 @@ def update_hs_review_tracking_list(flagged_hs_df):
 
     # Read the static master XLS file into a DataFrame
     static_xls_path = 'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx'
-    logging.info(f"...reading file: {static_xls_path}")
-    obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
-    data = obj['Body'].read()
-    excel_file = pd.ExcelFile(BytesIO(data))
+    logging.info(f"...Checking for file: {static_xls_path}")
+    try:
+        logging.info(f"...reading file: {static_xls_path}")
+        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+        data = obj['Body'].read()
+        excel_file = pd.ExcelFile(BytesIO(data))
 
-    static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
+        static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
-    # Compare records and append new flagged hunter survey records to the static DataFrame
-    new_records = flagged_hs_df[~flagged_hs_df['HUNTER_CWD_EAR_CARD_ID'].isin(static_df['HUNTER_CWD_EAR_CARD_ID'])]
-    
-    # Append new records to the static DataFrame
-    updated_tracking_df = pd.concat([static_df, new_records], ignore_index=True)
+        # Compare records and append new flagged hunter survey records to the static DataFrame
+        new_records = flagged_hs_df[~flagged_hs_df['HUNTER_CWD_EAR_CARD_ID'].isin(static_df['HUNTER_CWD_EAR_CARD_ID'])]
+        
+        #if there are new records to add, then append them to the static DataFrame
+        if len(new_records) == 0:
+            updated_tracking_df = static_df
+            logging.info(f"...no new records to add to the Hunter QA tracking list")
+        else:
+            # Append new records to the static DataFrame
+            updated_tracking_df = pd.concat([static_df, new_records], ignore_index=True)
 
-    # Fill nan values with empty strings
-    updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
-    #replace Not a Time (NaT) for entire dataframe
-    updated_tracking_df = updated_tracking_df.replace(['NaT'], '')
+            # Fill nan values with empty strings
+            updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
+            #replace Not a Time (NaT) for entire dataframe
+            updated_tracking_df = updated_tracking_df.replace(['NaT'], '')
 
-    # Sort the DataFrame
-    updated_tracking_df = updated_tracking_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','HUNTER_CWD_EAR_CARD_ID'])
+            # Sort the DataFrame
+            updated_tracking_df = updated_tracking_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','HUNTER_CWD_EAR_CARD_ID'])
 
-    # Overwrite to xls
-    logging.info("..saving the revised tracking list to xls")
-    print(f"\n{len(new_records)}... new flagged records found for Hunter Survey... added to {len(static_df)} existing records\n")
-    #save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/hunter_survey_mismatches/cwd_hunter_survey_qa_flag_status_tracking_master_{current_datetime_str}.xlsx')
-    save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx')
+            # Overwrite to xls
+            logging.info("..saving the revised tracking list to xls")
+            print(f"\n{len(new_records)}... new flagged records found for Hunter Survey... added to {len(static_df)} existing records\n")
+            #save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/hunter_survey_mismatches/cwd_hunter_survey_qa_flag_status_tracking_master_{current_datetime_str}.xlsx')
+            save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx')
+
+    except Exception as e:
+        logging.info(f"\n***WARNING...tracking file not currently found: {static_xls_path}\n...Skipping the update of the xls tracking list.\n")
+        # Create an empty dataframe as a place holder until xls is back online
+        updated_tracking_df = pd.DataFrame()
 
     return updated_tracking_df
 
 
-def update_hunter_flags_to_ago(df_hs, df_tracking_status, spatial_fl_id):
+def update_hunter_flags_to_ago(df_hs, updated_tracking_df, spatial_fl_id):
     """
     Update the AGO Hunter Survey Feature layer with the latest QA flags (Species, Sex, Mortalitiy Date mismatches) 
-    from df_hs, and the qa tracking status from updated_tracking_df/df_tracking_status
+    from df_hs, and the qa tracking status from updated_tracking_df
     
     Note that some hunter survey FL records aren't being updated by the script, 
-    e.g. if there are duplicate IDs, or if new records are added in the hunter survey after the data is grabbed from AGO.
+    e.g. if there are duplicate IDs, or if new records are added in the hunter survey after the data is grabbed from AGO by this script.
+    Also, if an EarCard Number is updated in AGO, it will not match the original tracking status record.  The status
+    will need to be updated manually in AGO.
 
     Inputs:
     - df_hs: DataFrame containing all hunter survey data, with QA flags.
-    - df_tracking_status: DataFrame containing the QA master tracking status for the hunter survey data.
+    - updated_tracking_df: DataFrame containing the QA master tracking status for the hunter survey data.
     - spatial_fl_id: AGO item ID for the hunter survey feature layer.
 
     Returns:
@@ -754,39 +770,48 @@ def update_hunter_flags_to_ago(df_hs, df_tracking_status, spatial_fl_id):
             #print(f"Updated {upd_feature.attributes[fl_sum_fld]} sample count to {upd_val} at {timenow_rounded}", flush=True)
             uCount = uCount + 1
         except Exception as e:
-            print(f"Could not update {ROW_ID}. Exception: {e}")
+            print(f"Could not update {ROW_ID}. Exception: {e}.  Ear Card ID may have been updated.")
             continue
     logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the new QA Flags for:  {uCount} records.')
 
+    #if updated_tracking_df is not empty (i.e. xls file is available and has records), then update the AGO FL with the review status and comments  
+    if not updated_tracking_df.empty:
+        logging.info('Updating the AGO Hunter Survey Feature Layer with the latest QA tracking review status and comments ...')
 
-    logging.info('Updating the AGO Hunter Survey Feature Layer with the latest QA tracking review status and comments ...')
-    """# filter df for where there are review status /comments
-    df_tracking_status_select = df_tracking_status[
-        (df_tracking_status['QA_HUNTER_SURVEY_REVIEW_STATUS'].notna() & df_tracking_status['QA_HUNTER_SURVEY_REVIEW_STATUS'].str.strip() != '') |
-        (df_tracking_status['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].notna() & df_tracking_status['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].str.strip() != '')
-        ]
+        # Fill nan values with empty strings
+        updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
     
-    print(f"{len(df_tracking_status_select)}... records found for Hunter Survey review tracking... of a total of {df_tracking_status} flagged records\n")
-    """
+        """# Testing: filter df for where there are review status /comments
+        updated_tracking_df_select = updated_tracking_df[
+            (updated_tracking_df['QA_HUNTER_SURVEY_REVIEW_STATUS'].notna() & updated_tracking_df['QA_HUNTER_SURVEY_REVIEW_STATUS'].str.strip() != '') |
+            (updated_tracking_df['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].notna() & updated_tracking_df['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].str.strip() != '')
+            ]
+        
+        print(f"{len(updated_tracking_df_select)}... records found for Hunter Survey review tracking... of a total of {updated_tracking_df} flagged records\n")
+        """
+        
+        # Update the Feature Layer with the QA flags for matching records, if there are any available records.
+        # Use all records in the updated_tracking_df, without any filter, in order to update with any revised review status or comments.
+        
+       
+        uCount = 0   #initiate counter
+        for ROW_ID in updated_tracking_df[fl_sum_fld]:
+            try:
+                upd_feature = [f for f in hs_features if f.attributes[fl_sum_fld] == ROW_ID][0]  #get the spatial feature
+                upd_row = updated_tracking_df.loc[updated_tracking_df[df_sum_fld] == ROW_ID]   #get the dataframe row
+                upd_val_1 = upd_row['QA_HUNTER_SURVEY_REVIEW_STATUS'].values[0]
+                upd_val_2 = upd_row['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].values[0]
+                upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_STATUS'] = str(upd_val_1)
+                upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_COMMENTS'] = str(upd_val_2)
+                hs_lyr.edit_features(updates=[upd_feature])
+                uCount = uCount + 1
+            except Exception as e:
+                print(f"Could not update {ROW_ID}. Exception: {e}")
+                continue
+        logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the Review Status and Comments for:  {uCount} records.')
+    else:
+        logging.info('No records found for Hunter Survey review tracking at the moment...no updates made to the AGO Feature Layer.')
     
-    # Update the Feature Layer with the QA flags for matching records
-    # Use all records in the df_tracking_status, without any filter, in order to update with any revised review status or comments.
-    uCount = 0   #initiate counter
-    for ROW_ID in df_tracking_status[fl_sum_fld]:
-        try:
-            upd_feature = [f for f in hs_features if f.attributes[fl_sum_fld] == ROW_ID][0]  #get the spatial feature
-            upd_row = df_tracking_status.loc[df_tracking_status[df_sum_fld] == ROW_ID]   #get the dataframe row
-            upd_val_1 = upd_row['QA_HUNTER_SURVEY_REVIEW_STATUS'].values[0]
-            upd_val_2 = upd_row['QA_HUNTER_SURVEY_REVIEW_COMMENTS'].values[0]
-            upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_STATUS'] = str(upd_val_1)
-            upd_feature.attributes['QA_HUNTER_SURVEY_REVIEW_COMMENTS'] = str(upd_val_2)
-            hs_lyr.edit_features(updates=[upd_feature])
-            uCount = uCount + 1
-        except Exception as e:
-            print(f"Could not update {ROW_ID}. Exception: {e}")
-            continue
-    logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the Review Status and Comments for:  {uCount} records.')
-
     return
 
 def find_and_save_duplicates(df, fld, output_path):
@@ -1329,6 +1354,10 @@ def backup_master_dataset(s3_client, bucket_name):
 def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     """
     Publishes the master dataset to AGO, overwriting if it already exists.
+
+    CHECK:  why are numeric types in data dictionary being replaced with string types? Is
+    this related to filling with length 25 by default?  Or does a blank feature template have to 
+    be created first if string types cannot be converted to numeric types?
     """
     # Cleanup the master dataset before publishing
     df = df.dropna(subset=[latcol, longcol])
@@ -1337,6 +1366,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     # Drop personal info fields from the dataset
     drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID']
     df = df.drop(columns=[col for col in drop_cols if col in df.columns])
+
 
     # Define Pacific timezone
     pacific_timezone = pytz.timezone('America/Vancouver')
@@ -1355,7 +1385,22 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08                                                                       
     '''
 
-    # Fill NaN and NaT values
+    #Convert numeric column types and fill empty numeric values with zero
+    float_cols = ['SAMPLE_CWD_TONSIL_NUM', 'SAMPLE_CWD_RPLN_NUM', 'SAMPLE_PLN_NUM', 'SAMPLE_MLN_NUM']
+    int_cols = ['SAMPLE_COVID_SWAB_NUM','SAMPLE_NOBUTO_NUM']
+    zero_cols = float_cols + int_cols
+    
+    #df[zero_cols] = df[zero_cols].fillna(0).astype(float)
+    df[zero_cols] = df[zero_cols].astype(float)
+    df[zero_cols] = df[zero_cols].fillna(0)  #must fill with 0 after converting to float
+
+    #print(df[zero_cols].dtypes)
+    #print(df[zero_cols])
+
+    #df[float_cols] = df[float_cols].astype(float)
+    #df[int_cols] = df[int_cols].astype(int)  #won't work if there are decimal values in df
+
+    # Fill NaN and NaT values in text and date strings
     df = df.fillna('')
 
     # Create a spatial dataframe
@@ -1438,7 +1483,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
 
 def retrieve_field_properties (s3_client, bucket_name):
     """
-    Constructs a dictionnaries containing field properties.
+    Constructs dictionaries containing field properties.
     """
     prefix= 'incoming_from_idir/data_dictionary/'
 
@@ -1456,7 +1501,7 @@ def retrieve_field_properties (s3_client, bucket_name):
     df_datadict = pd.read_excel(excel_file, sheet_name='Data Dictionary')
     df_pcklists = pd.read_excel(excel_file, sheet_name='Picklists')
 
-    #Creating domains dictionnary
+    #Creating domains dictionary
     df_domfields = df_datadict[['Domain Name','GIS_FIELD_NAME']].dropna(subset=['Domain Name'])
     field_match_dict = df_domfields.set_index('Domain Name')['GIS_FIELD_NAME'].to_dict()
 
@@ -1469,9 +1514,19 @@ def retrieve_field_properties (s3_client, bucket_name):
         field_name = column
         values = df_pcklists[field_name].dropna().tolist()  # Drop NaN values and convert to list
 
+        #TEMP - check syntax - this doesn't seem to do anything.
+        """# Ensure coded values are integers for esriFieldTypeSmallInteger fields
+        if field_name in field_match_dict and df_datadict.loc[df_datadict['GIS_FIELD_NAME'] == field_name, 'Type'].values[0] == 'SHORT':
+            print(f"Converting {field_name} values to integers")
+            values = [int(value) for value in values]"""
+
         # Create the domain dictionary for the field
         domain_values = {str(value): str(value) for value in values}
         domains_dict[field_name] = domain_values
+
+    #print(f"\nDomains Dictionary: {domains_dict}")
+    #TEMP - empty the dictionary for testing
+    #domains_dict = {}
 
     #Creating field length and type dictionnary
     df_fprop= df_datadict[['GIS_FIELD_NAME', 'Type', 'Length', 'Alias']]
@@ -1482,10 +1537,10 @@ def retrieve_field_properties (s3_client, bucket_name):
     # Mapping from custom types to ArcGIS field types
     type_mapping = {
         'TEXT': 'esriFieldTypeString',
-        'DATEONLY': 'esriFieldTypeDate',  # Date and Time
+        'DATEONLY': 'esriFieldTypeDateOnly',  # Date Only
         'DATE': 'esriFieldTypeDate',      # Date and Time
         'LONG': 'esriFieldTypeInteger',
-        'SHORT': 'esriFieldTypeSmallInteger',
+        'SHORT': 'esriFieldTypeSmallInteger',  #does not work if coded domain values are not integers e.g. 1 vs 1.0.
         'FLOAT': 'esriFieldTypeSingle',
         'DOUBLE': 'esriFieldTypeDouble'
     }
@@ -1493,11 +1548,20 @@ def retrieve_field_properties (s3_client, bucket_name):
 
     fprop_dict = df_fprop.set_index('GIS_FIELD_NAME').T.to_dict()
 
+    #print(f"\nDomains Dictionary: {domains_dict}")
+    #print(f"\nField Properties Dictionary: {fprop_dict}")
+
     return domains_dict, fprop_dict
 
 
 def apply_field_properties(gis, title, domains_dict, fprop_dict):
-    """Applies Field proprities to the published Feature Layer"""
+    """Applies Field properities to the published Feature Layer
+
+        NOTE:  
+        28-Feb-2025     This function is not working as expected.  The field properties are not being updated.
+                        A recent AGO update also messed with esriFieldTypeSmallInteger fields and domain values and issues with decimal vs integer values?
+
+    """
     # Retrieve the published feature layer
     feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
     feature_layer = feature_layer_item.layers[0]
@@ -1608,7 +1672,13 @@ def test_save_spatial_files(df, s3_client, bucket_name):
 
     except Exception as e:
         logging.error(f"..failed to save or upload the shapefile: {e}")       
-        
+
+
+#---------------------------------------------------------------------------------------------------
+#  MAIN
+#---------------------------------------------------------------------------------------------------
+
+
 if __name__ == "__main__":
     start_t = timeit.default_timer() #start time
 
@@ -1634,6 +1704,7 @@ if __name__ == "__main__":
     timenow_rounded = datetime.now().astimezone(pacific_timezone)
     today = datetime.today().strftime('%Y%m%d')
 
+    
     if s3_client:
         logging.info('\nRetrieving Incoming Data from Object Storage')
         df = get_incoming_data_from_os(s3_client)
@@ -1641,6 +1712,7 @@ if __name__ == "__main__":
         logging.info('\nRetrieving Centroid CSV Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
 
+    print(f"\n---------------- Print Statements  ----------------\n")
     
     logging.info('\nGetting Hunter Survey Data from AGOL')
     # Using Featire Layer ID is more reliable than the Name, which can be amiguous.
@@ -1653,14 +1725,13 @@ if __name__ == "__main__":
     rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
 
     
-    #----------------------------------------------------
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
 
-    
     logging.info('\nAdding hunter survey (hs) data to Master sampling dataset')
     df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, hunter_df)
 
+    
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
     updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
 
@@ -1684,8 +1755,8 @@ if __name__ == "__main__":
     sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
     sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
 
- 
-    # logging.info('\nInitiating .... Saving an XLSX for the webpage')
+
+    logging.info('\nInitiating .... Saving an XLSX for the webpage')
     # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBO#
     # #folder = 'Web/'       # this points to BCBOX
     # #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
@@ -1696,9 +1767,9 @@ if __name__ == "__main__":
     
 
     logging.info('\nInitiating .... Saving an XLSX for lab testing')
-    #bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
-    #folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
-    #save_lab_submission (df_wh, s3_client, bucket_name_bbx, folder_bbx)
+    # bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
+    # folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
+    # save_lab_submission (df_wh, s3_client, bucket_name_bbx, folder_bbx)
 
     bucket_name= 'whcwdd' # this points to GeoDrive
     folder= 'share_labs/for_lab/' # this points to GeoDrive
@@ -1714,15 +1785,17 @@ if __name__ == "__main__":
     #TESTING
     #logging.info('\nSaving spatial data')
     #test_save_spatial_files(df_wh, s3_client, bucket_name)
-
+    
+    
     logging.info('\nPublishing the Master Dataset to AGO')
     title='CWD_Master_dataset'
     folder='2024_CWD'
     latcol='MAP_LATITUDE'
     longcol= 'MAP_LONGITUDE'
     published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
-
+    
     logging.info('\nApplying field properties to the Feature Layer')
+    bucket_name= 'whcwdd'
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
