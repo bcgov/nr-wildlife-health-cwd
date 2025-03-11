@@ -1036,50 +1036,55 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
 
     # Read the static master XLS file into a DataFrame
     static_xls_path = 'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx'
-    logging.info(f"...reading file: {static_xls_path}")
-    obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
-    data = obj['Body'].read()
-    excel_file = pd.ExcelFile(BytesIO(data))
+    logging.info(f"...Checking for file:: {static_xls_path}")
+    try:
+        logging.info(f"...reading file: {static_xls_path}")
+        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+        data = obj['Body'].read()
+        excel_file = pd.ExcelFile(BytesIO(data))
 
-    static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
+        static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
-    # Compare records and append new flagged hunter survey records to the static DataFrame
-    new_records = flagged_df[~flagged_df['WLH_ID'].isin(static_df['WLH_ID'])]
-    
-    print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
-    
-    new_records = new_records.reset_index()
+        # Compare records and append new flagged hunter survey records to the static DataFrame
+        new_records = flagged_df[~flagged_df['WLH_ID'].isin(static_df['WLH_ID'])]
+        
+        print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
+        
+        new_records = new_records.reset_index()
 
-    # Ensure both DataFrames have the same columns and data types
-    static_df['QA_REG_WMU_CHECK_STATUS'] = static_df['QA_REG_WMU_CHECK_STATUS'].astype(object)
-    static_df['QA_REG_WMU_CHECK_COMMENTS'] = static_df['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
+        # Ensure both DataFrames have the same columns and data types
+        static_df['QA_REG_WMU_CHECK_STATUS'] = static_df['QA_REG_WMU_CHECK_STATUS'].astype(object)
+        static_df['QA_REG_WMU_CHECK_COMMENTS'] = static_df['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
 
-    new_records['QA_REG_WMU_CHECK_STATUS'] = new_records['QA_REG_WMU_CHECK_STATUS'].astype(object)
-    new_records['QA_REG_WMU_CHECK_COMMENTS'] = new_records['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
-    
-    for col in static_df.columns:
-        if col in new_records.columns:
-            #print(f"\tColumn {col} found: {static_df[col].dtype} ... {new_records[col].dtype}")
-            new_records[col] = new_records[col].astype(static_df[col].dtype)
-        else:
-            print(f"Column {col} NOT found in new_records")
-    
+        new_records['QA_REG_WMU_CHECK_STATUS'] = new_records['QA_REG_WMU_CHECK_STATUS'].astype(object)
+        new_records['QA_REG_WMU_CHECK_COMMENTS'] = new_records['QA_REG_WMU_CHECK_COMMENTS'].astype(object)
+        
+        for col in static_df.columns:
+            if col in new_records.columns:
+                #print(f"\tColumn {col} found: {static_df[col].dtype} ... {new_records[col].dtype}")
+                new_records[col] = new_records[col].astype(static_df[col].dtype)
+            else:
+                print(f"Column {col} NOT found in new_records")
+        
 
-    # Append new records to the static DataFrame
-    tracking_df = pd.concat([static_df, new_records], ignore_index=True)
+        # Append new records to the static DataFrame
+        tracking_df = pd.concat([static_df, new_records], ignore_index=True)
 
-    # Fill nan values with empty strings
-    tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']] = tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']].fillna('')
-    #replace Not a Time (NaT) for entire dataframe
-    tracking_df = tracking_df.replace(['NaT'], '')
+        # Fill nan values with empty strings
+        tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']] = tracking_df[['QA_REG_WMU_CHECK_STATUS', 'QA_REG_WMU_CHECK_COMMENTS']].fillna('')
+        #replace Not a Time (NaT) for entire dataframe
+        tracking_df = tracking_df.replace(['NaT'], '')
 
-    # Sort the DataFrame
-    tracking_df = tracking_df.sort_values(by=['WLH_ID'])
+        # Sort the DataFrame
+        tracking_df = tracking_df.sort_values(by=['WLH_ID'])
 
-    # Overwrite to xls
-    logging.info("..saving the revised tracking list to xls")
-    #print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... added to {len(static_df)} existing records\n")
-    save_xlsx_to_os(s3_client, 'whcwdd', tracking_df, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+        # Overwrite to xls
+        logging.info("..saving the revised tracking list to xls")
+        #print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... added to {len(static_df)} existing records\n")
+        save_xlsx_to_os(s3_client, 'whcwdd', tracking_df, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+
+    except Exception as e:
+        logging.info(f"\n***WARNING...tracking file not currently found: {static_xls_path}\n...Skipping the update of the xls tracking list.\n")
 
     return
 
