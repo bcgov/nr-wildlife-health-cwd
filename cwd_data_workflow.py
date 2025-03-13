@@ -355,8 +355,8 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     #logging.info("..calculating Hunter Survey QA flags")
 
     # Length of initial dataframes
-    print(f"\n\t{len(df.index)}... Total Sampling Records in df")
-    print(f"\t{len(hunter_df.index)}... Total Hunter Survey Records in hunter_df\n")
+    #print(f"\n\t{len(df.index)}... Total Sampling Records in df")
+    #print(f"\t{len(hunter_df.index)}... Total Hunter Survey Records in hunter_df\n")
 
     cols = [
     "HUNTER_CWD_EAR_CARD_ID",
@@ -529,7 +529,7 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     # Select only the records that have QA flags (Not Matched) or are duplicates of Ear Card IDs
     flagged_hs_df = flagged_hs_df[(flagged_hs_df['QA_HUNTER_SURVEY_FLAG'] != 'Matched') | (flagged_hs_df['QA_HUNTER_EARCARD_DUPLICATE'] == 'DUPLICATE')]
     
-    print(f"\n\t{len(flagged_hs_df.index)}... flagged hunter survey qa records found ... of a total of {len(hs_merged_df.index)} hs_merged_df records\n")
+    #print(f"\n\t{len(flagged_hs_df.index)}... flagged hunter survey qa records found ... of a total of {len(hs_merged_df.index)} hs_merged_df records\n")
     
     logging.info("..saving the Hunter Survey QA flags to xls")
     save_xlsx_to_os(s3_client, 'whcwdd', flagged_hs_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_1_flags_for_review_{current_datetime_str}.xlsx')
@@ -624,9 +624,9 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     #Sort
     df_wh = df_wh.sort_values(by=['WLH_ID'])
 
-    print(f"\n\t{len(df_wh.index)}... records in df_wh")
-    print(f"\t{len(hs_merged_df.index)}... records in hs_merged_df")
-    print(f"\t{len(flagged_hs_df.index)}... records in flagged_hs_df\n")
+    print(f"\n\t{len(df_wh.index)}... records in df_wh - master sampling dataset with hunter survey matches")
+    print(f"\t{len(hs_merged_df.index)}... records in hs_merged_df - hunter survey records")
+    print(f"\t{len(flagged_hs_df.index)}... records in flagged_hs_df - flagged hunter survey qa records \n")
 
     return df_wh, hs_merged_df, flagged_hs_df
 
@@ -652,10 +652,11 @@ def update_hs_review_tracking_list(flagged_hs_df):
     static_xls_path = 'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx'
     logging.info(f"...Checking for file: {static_xls_path}")
     try:
-        logging.info(f"...reading file: {static_xls_path}")
         obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
         data = obj['Body'].read()
         excel_file = pd.ExcelFile(BytesIO(data))
+
+        logging.info(f"...reading file: {static_xls_path}")
 
         static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
@@ -1038,10 +1039,11 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
     static_xls_path = 'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx'
     logging.info(f"...Checking for file:: {static_xls_path}")
     try:
-        logging.info(f"...reading file: {static_xls_path}")
         obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
         data = obj['Body'].read()
         excel_file = pd.ExcelFile(BytesIO(data))
+
+        logging.info(f"...reading file: {static_xls_path}")
 
         static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
@@ -1110,7 +1112,7 @@ def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_f
     #print(f'Number of summary units with sampled data for {df_sum_fld}: {df_unit_count}')
 
     ## Save the summary to a file in object storage
-    logging.info('\nSaving the TEST summary')
+    logging.info('\nSaving the Rollup summaries...')
     bucket_name='whcwdd'
     summary_file_name = (df_sum_fld.lower()) +'_rollup_summary.xlsx'
     save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/spatial_rollup/'+summary_file_name)
@@ -1729,7 +1731,6 @@ if __name__ == "__main__":
     mu_flayer_lyr, mu_flayer_fset, mu_features, mu_flayer_sdf = get_ago_flayer('0b81e46151184058a88c701853e09577')
     rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
 
-    
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
 
@@ -1755,10 +1756,6 @@ if __name__ == "__main__":
 
     logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
     update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
-
-    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
-    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
-    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
 
 
     logging.info('\nInitiating .... Saving an XLSX for the webpage')
@@ -1804,6 +1801,11 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
+
+    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
+    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
+    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
+
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
