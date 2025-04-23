@@ -284,6 +284,8 @@ def process_master_dataset(df):
     
     #correct errrors in MU column
     def correct_mu_value(mu):
+        
+
         # Remove any letters and spaces
         mu = re.sub(r'[a-zA-Z\s]', '', mu)
         
@@ -293,6 +295,11 @@ def process_master_dataset(df):
             parts[1] = parts[1][1:]
         return '-'.join(parts)
     
+    # Fill blank MU values with 'Not Recorded'
+    df['WMU'] = df['WMU'].fillna('Not recorded')
+    df['WMU'] = df['WMU'].replace('', 'Not recorded')
+
+    # Apply correction to WMU column
     df['WMU'] = df['WMU'].apply(correct_mu_value)
     
     
@@ -1477,6 +1484,8 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     CHECK:  why are numeric types in data dictionary being replaced with string types? Is
     this related to filling with length 25 by default?  Or does a blank feature template have to 
     be created first if string types cannot be converted to numeric types?
+
+    CHECK:  why is feature layer always getting newly created instead of updating the existing one?
     """
     # Cleanup the master dataset before publishing
     df = df.dropna(subset=[latcol, longcol])
@@ -1587,6 +1596,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         new_geojson_item = gis.content.add(item_properties=geojson_item_properties, data=geojson_file, folder=folder)
 
         # Update the existing feature layer or create a new one if it doesn't exist
+        #  CHECK!   Is this always creating a new feature layer?  Or is it updating the existing one?
         if feature_layer_item:
             feature_layer_item.update(data=new_geojson_item, folder=folder)
             logging.info(f"..existing feature layer '{title}' updated successfully.")
