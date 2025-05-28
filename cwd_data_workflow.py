@@ -1441,13 +1441,16 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
 
 def save_tongue_sample_data(df_wh,df_tng_new):
     """
-    df_tng_orig_loc    temp df to hold LOCATION_OF_SAMPLE field from the original tongue tracking data, in which WH Team is making updates
-    df_tng             Select out SAMPLE_TONGUE_IND = 'Yes' from master sampling data
-    df_tng_new         from tongue sheets in XLSXs in object storage - merged for all species 
+    df_tng_new         from tongue sheets in XLSXs in object storage - merged for all species
+    df_tng_sampled     Select out SAMPLE_TONGUE_IND = 'Yes' from master sampling data
+    df_tng_bck         temp df to hold fields from the original tongue tracking data
+    
+    
     """
-    # Read the existing static master tongue tracking XLS file into a DataFrame to temporarily hold the existing LOCATION_OF_SAMPLE values
-    # if for some reason the xls file is not found in OS (sometimes from syncing issues), then skip the update of the tongue tracking list.
-    static_xls_path = 'master_dataset/tongue_samples/cwd_tongue_sample_tracking.xlsx'
+    # Join the latest merged tongue file with selected fields from the master sampling data. 
+    # (Optional) Read the existing static merged tongue tracking XLS file into a DataFrame to temporarily hold the data.
+    # if for some reason the xls file is not found in OS (sometimes from syncing issues), then skip the overwrite of the merged tongue file.
+    static_xls_path = 'master_dataset/tongue_samples/cwd_tongue_samples_merged.xlsx'
     logging.info(f"...Checking for file: {static_xls_path}")
 
     #print(df_tng_new.dtypes)
@@ -1458,74 +1461,78 @@ def save_tongue_sample_data(df_wh,df_tng_new):
 
 
     if s3_file_exists_check(s3_client, bucket_name, static_xls_path):
-        try:
-            obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
-            data = obj['Body'].read()
-            excel_file = pd.ExcelFile(BytesIO(data))
+        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+        data = obj['Body'].read()
+        excel_file = pd.ExcelFile(BytesIO(data))
 
-            logging.info(f"...reading file: {static_xls_path}")
-            static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
+        logging.info(f"...reading file: {static_xls_path}")
+        static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
-            # Backup existing master tongue tracking file, if it exists (?)
-            # Get LOCATION_OF_SAMPLE records that are not null/blank
-            df_tng_orig_loc = static_df[~static_df['LOCATION_OF_SAMPLE'].isna()]
-            
-            # Get new xls sheets and convert incoming tongue tracking column names to uppercase and replace spaces with underscores
-            columns = df_tng_new.columns
-            df_tng_new.columns = [col.upper().replace(' ', '_') for col in columns]
-            logging.info(f"\n..{len(df_tng_new)}...records found in the submitted tongue tracking data")
-            
-            # Filter for records with SAMPLE_TONGUE_IND = 'Y' from the master dataframe
-            df_tng = df_wh[df_wh['SAMPLE_TONGUE_IND'] == 'Yes']
-            logging.info(f"..{len(df_tng)}... records found with SAMPLE_TONGUE_IND = 'Yes' in the master dataset")
-            
-            # Tongue tracking column list
-            #tng_column_list = ['Genomics ID','MU_NUMBER','PreFrozen', 'Still Frozen', 'Shipment Dec 2024', 'Box Number', 'Box Location Number', 'Date Samples Shipped']
-            #tng_column_list = [col.upper().replace(' ', '_') for col in tng_column_list]
-            tng_column_list = ['GENOMICS_ID', 'MU_NUMBER','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
-
-            # Join the tongue tracking fields to df_tng on WH_ID
-            df_tng = df_tng.merge(df_tng_new[tng_column_list + ['WLH_ID']], how='left', on='WLH_ID')
-            #logging.info(f"{len(df_tng_new)}... total merged tongue sample records")
-
-            # Strip down final fields
-            fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID', 'WLH_ID', 'CWD_EAR_CARD_ID', 'SPECIES', 'SEX', 'AGE_CLASS', 'AGE_ESTIMATE', 'ENV_REGION_NAME', 'WMU', 'MU_NUMBER', 'MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND', 'MAP_LATITUDE', 'MAP_LONGITUDE', 'MAP_SOURCE_DESCRIPTOR', 'GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
-            df_tng = df_tng[fldList]
-
-            # Sort the dataframe
-            df_tng = df_tng.sort_values(by=['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','WLH_ID'])
-
-            # Strip 0:0 time out of time fields
-            # Note: 'DATE_SAMPLES_SHIPPED' may contain text values!  e.g. Not shipped
-            for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #,'DATE_SAMPLES_SHIPPED']:  
-                df_tng[col] = pd.to_datetime(df_tng[col]).dt.date   #e.g.2024-09-08
-
-            # Remove ' 00:00:00' from all strings in the column
-            df_tng['DATE_SAMPLES_SHIPPED'] = df_tng['DATE_SAMPLES_SHIPPED'].astype(str).str.replace(' 00:00:00', '', regex=False)
-            
-
-            # if there are existing records with LOCATION_OF_SAMPLE populated, then re-join these to the new tongue sample dataframe.
-            # Join the LOCATION_OF_SAMPLE field back to df_tng on WLH_ID
-            if len(df_tng_orig_loc) > 0:
-                df_tng = df_tng.merge(df_tng_orig_loc[['WLH_ID', 'LOCATION_OF_SAMPLE']], how='left', on='WLH_ID')
-                logging.info(f"..{len(df_tng_orig_loc)}... original LOCATION_OF_SAMPLE records added back to latest tongue sample records")
-            elif len(df_tng_orig_loc) == 0:
-                # Add blank field
-                df_tng[['LOCATION_OF_SAMPLE']] = ''
-                logging.info(f"...no existing LOCATION_OF_SAMPLE values to add to cwd_tongue_sample_tracking ")
-
-            # Fill NaN values with empty strings
-            df_tng['DATE_SAMPLES_SHIPPED'] = df_tng['DATE_SAMPLES_SHIPPED'].fillna('') #Not working?
-
-            # Export to XLS
-            logging.info(f"..saving the Tongue Tracking File to xls")
-            #save_xlsx_to_os(s3_client, 'whcwdd', df_tng, f'master_dataset/tongue_samples/cwd_tongue_sample_tracking_{current_datetime_str}.xlsx')
-            save_xlsx_to_os(s3_client, 'whcwdd', df_tng, f'master_dataset/tongue_samples/cwd_tongue_sample_tracking.xlsx')
-
-        except Exception as e:
-            logging.info(f"\n***WARNING...an error occurred in the tongue sampling function: {e}\n...Skipping the update of the tongue sampling xls tracking list.\n")
+        # Temp dataframe to hold original file, if needed.  e.g. to backup existing master tongue tracking file.
+        # df_tng_bck = static_df[~static_df['LOCATION_OF_SAMPLE'].isna()]
+        df_tng_bck = static_df
     else:
-        logging.info(f"\n***WARNING...original xls file not currently found: {static_xls_path}\n...Skipping the update of the tongue sampling xls tracking list.\n")
+        logging.info(f"\n***WARNING...original xls file not currently found: {static_xls_path}\n...Skipping the backup of the tongue sampling xls tracking list.\n")
+
+    
+    try:
+        # Get new merged tongue xls sheet and convert incoming tongue tracking column names to uppercase and replace spaces with underscores
+        columns = df_tng_new.columns
+        df_tng_new.columns = [col.upper().replace(' ', '_') for col in columns]
+        logging.info(f"\n..{len(df_tng_new)}...records found in the submitted tongue tracking data")
+        
+        # Filter for records with SAMPLE_TONGUE_IND = 'Y' from the master dataframe
+        df_tng_sampled = df_wh[df_wh['SAMPLE_TONGUE_IND'] == 'Yes']
+        logging.info(f"..{len(df_tng_sampled)}... records found with SAMPLE_TONGUE_IND = 'Yes' in the master dataset")
+        
+        # Tongue tracking column list
+        #tng_column_list = ['Genomics ID','MU_NUMBER','PreFrozen', 'Still Frozen', 'Shipment Dec 2024', 'Box Number', 'Box Location Number', 'Date Samples Shipped']
+        #tng_column_list = [col.upper().replace(' ', '_') for col in tng_column_list]
+        tng_column_list = ['GENOMICS_ID', 'MU_NUMBER','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
+
+        # Join the tongue tracking fields to df_tng_sampled on WH_ID
+        df_tng_sampled = df_tng_sampled.merge(df_tng_new[tng_column_list + ['WLH_ID']], how='left', on='WLH_ID')
+        logging.info(f"{len(df_tng_sampled)}... total merged tongue sample records")
+
+        # Strip down final fields
+        fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID', 'WLH_ID', 'CWD_EAR_CARD_ID', 'SPECIES', 'SEX', 'AGE_CLASS', 'AGE_ESTIMATE', 'ENV_REGION_NAME', 'WMU', 'MU_NUMBER', 'MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND', 'MAP_LATITUDE', 'MAP_LONGITUDE', 'MAP_SOURCE_DESCRIPTOR', 'GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
+        df_tng_sampled = df_tng_sampled[fldList]
+
+        # Sort the dataframe
+        df_tng_sampled = df_tng_sampled.sort_values(by=['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','WLH_ID'])
+
+        # Strip 0:0 time out of time fields
+        # Note: 'DATE_SAMPLES_SHIPPED' may contain text values!  e.g. Not shipped
+        for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #,'DATE_SAMPLES_SHIPPED']:  
+            df_tng_sampled[col] = pd.to_datetime(df_tng_sampled[col]).dt.date   #e.g.2024-09-08
+
+        # Remove ' 00:00:00' from all strings in the column
+        df_tng_sampled['DATE_SAMPLES_SHIPPED'] = df_tng_sampled['DATE_SAMPLES_SHIPPED'].astype(str).str.replace(' 00:00:00', '', regex=False)
+        
+        # Fill NaN values with empty strings
+        df_tng_sampled['DATE_SAMPLES_SHIPPED'] = df_tng_sampled['DATE_SAMPLES_SHIPPED'].fillna('') #Not working?
+
+        # SKIP.  DEPRECATED .if there are existing records with LOCATION_OF_SAMPLE populated, then re-join these to the new tongue sample dataframe.
+        # Join the LOCATION_OF_SAMPLE field back to df_tng_sampled on WLH_ID
+        '''
+        if len(df_tng_bck) > 0:
+            df_tng_sampled = df_tng_sampled.merge(df_tng_bck[['WLH_ID', 'LOCATION_OF_SAMPLE']], how='left', on='WLH_ID')
+            logging.info(f"..{len(df_tng_bck)}... original LOCATION_OF_SAMPLE records added back to latest tongue sample records")
+        elif len(df_tng_bck) == 0:
+            # Add blank field
+            df_tng_sampled[['LOCATION_OF_SAMPLE']] = ''
+            logging.info(f"...no existing LOCATION_OF_SAMPLE values to add to cwd_tongue_sample_tracking ")
+        '''
+        
+
+        # Export to XLS
+        logging.info(f"..saving the Tongue Tracking File to xls")
+        #save_xlsx_to_os(s3_client, 'whcwdd', df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_sample_tracking_{current_datetime_str}.xlsx')
+        save_xlsx_to_os(s3_client, 'whcwdd', df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_samples_merged.xlsx')
+
+    except Exception as e:
+        logging.info(f"\n***WARNING...an error occurred in the tongue sampling function: {e}\n...Skipping the update of the tongue sampling xls tracking list.\n")
+
     return
 
 
@@ -1921,7 +1928,7 @@ if __name__ == "__main__":
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
     updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
 
-    
+    #'''
     logging.info('\nUpdating the AGO Hunter Survey Feature Layer with the latest QA flags')
     update_hunter_flags_to_ago(hs_merged_df, updated_tracking_df, AGO_HUNTER_ITEM_ID)
 
@@ -1935,7 +1942,7 @@ if __name__ == "__main__":
 
     logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
     update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
-    
+    #'''
 
     logging.info('\nSaving the Master Dataset xlsx to Object Storage')
     bucket_name='whcwdd'   # this points to GeoDrive
@@ -1968,7 +1975,8 @@ if __name__ == "__main__":
     df_tng_new = append_xls_files_from_os(s3_client, bucket_name, folder,'genomebc_tongues', header_index_num=None, required_headers=required_headers, sheet_name=0)
     save_tongue_sample_data(df_wh,df_tng_new)
 
-    
+
+
     # TESTING EXPORTING SPATIAL DATA
     #logging.info('\nSaving spatial data')
     #test_save_spatial_files(df_wh, s3_client, bucket_name)
