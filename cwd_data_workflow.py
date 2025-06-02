@@ -1443,7 +1443,7 @@ def save_tongue_sample_data(df_wh,df_tng_new):
     """
     df_tng_new         from tongue sheets in XLSXs in object storage - merged for all species
     df_tng_sampled     Select out SAMPLE_TONGUE_IND = 'Yes' from master sampling data
-    df_tng_bck         temp df to hold fields from the original tongue tracking data
+    df_tng_bck         temp df to hold fields from the original tongue tracking data, if needed
     
     
     """
@@ -1494,8 +1494,8 @@ def save_tongue_sample_data(df_wh,df_tng_new):
         df_tng_sampled = df_tng_sampled.merge(df_tng_new[tng_column_list + ['WLH_ID']], how='left', on='WLH_ID')
         logging.info(f"{len(df_tng_sampled)}... total merged tongue sample records")
 
-        # Strip down final fields
-        fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID', 'WLH_ID', 'CWD_EAR_CARD_ID', 'SPECIES', 'SEX', 'AGE_CLASS', 'AGE_ESTIMATE', 'ENV_REGION_NAME', 'WMU', 'MU_NUMBER', 'MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND', 'MAP_LATITUDE', 'MAP_LONGITUDE', 'MAP_SOURCE_DESCRIPTOR', 'GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
+        # Strip down/re-order final fields
+        fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','SAMPLING_SESSION_ID','WLH_ID','CWD_EAR_CARD_ID','DROPOFF_LOCATION','COLLECTION_DATE','SPECIES','SEX','AGE_CLASS','AGE_ESTIMATE','MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND','SAMPLE_EAR_TIP_IND','CWD_TEST_STATUS','ENV_REGION_NAME', 'WMU', 'MU_NUMBER','MAP_LATITUDE', 'MAP_LONGITUDE', 'MAP_SOURCE_DESCRIPTOR', 'GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
         df_tng_sampled = df_tng_sampled[fldList]
 
         # Sort the dataframe
@@ -1974,8 +1974,6 @@ if __name__ == "__main__":
     required_headers = ['CWD_LAB_SUBMISSION_ID','WLH_ID','CWD_EAR_CARD_ID']  #provide either the required headers or the header index number
     df_tng_new = append_xls_files_from_os(s3_client, bucket_name, folder,'genomebc_tongues', header_index_num=None, required_headers=required_headers, sheet_name=0)
     save_tongue_sample_data(df_wh,df_tng_new)
-
-
 
     # TESTING EXPORTING SPATIAL DATA
     #logging.info('\nSaving spatial data')
