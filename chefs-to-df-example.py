@@ -8,9 +8,25 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 FORM_ID = os.getenv("CHEFS_FORM_ID")
 API_KEY = os.getenv("CHEFS_API_KEY")
-VERSION_ID = os.getenv("CHEFS_VERSION_ID")
 BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
-CHEFS_HIDDEN_FIELDS = ["HUNTER_LATITUDE_DD_CALC","HUNTER_LONGITUDE_DD_CALC"]
+CHEFS_HIDDEN_FIELDS = ["HUNTER_LATITUDE_DD_CALC","HUNTER_LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
+
+def get_chefs_form_version(base_url, form_id, api_key):
+    """
+    Retrieves the published version of the CHEFS form.
+
+    Returns: the version ID of the published form.
+    """
+
+    v = requests.get(f"{base_url}/{form_id}/version", auth=(form_id, api_key))
+    if v.status_code == 200:
+        logging.info("Form version fetched successfully")
+        version_data = v.json()
+        version_id = version_data['versions'][0]['id']
+        return version_id
+    else:
+        logging.error(f"Failed to fetch form version: {v.status_code} - {v.text}")
+
 
 def get_chefs_field_names(base_url, version_id, form_id, api_key, hidden_fields):
     """
@@ -44,13 +60,20 @@ def get_chefs_submissions(base_url, form_id, api_key, fields):
         logging.info("Submissions fetched successfully")
         data = r.json()
         chefs_df = pd.json_normalize(data)
+
+        logging.info(f"Removing deleted submissions from the DataFrame")
+        chefs_df = chefs_df[chefs_df['deleted'] == False]
+
         return chefs_df
     else:
         logging.error(f"Failed to fetch submissions: {r.status_code} - {r.text}")
 
 if __name__ == "__main__":
-    logging.info(f"Fetching field names for form verion {VERSION_ID}")
-    chefs_fields = get_chefs_field_names(BASE_URL, VERSION_ID, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
+    logging.info("Fetching the published version ID of the CHEFS form")
+    version_id = get_chefs_form_version(BASE_URL, FORM_ID, API_KEY)
+
+    logging.info(f"Fetching field names for form verion {version_id}")
+    chefs_fields = get_chefs_field_names(BASE_URL, version_id, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
 
     logging.info("Fetching submissions from the form")
     chefs_df = get_chefs_submissions(BASE_URL, FORM_ID, API_KEY, chefs_fields)
