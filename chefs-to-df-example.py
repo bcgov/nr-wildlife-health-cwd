@@ -11,69 +11,55 @@ API_KEY = os.getenv("CHEFS_API_KEY")
 BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
 CHEFS_HIDDEN_FIELDS = ["HUNTER_LATITUDE_DD_CALC","HUNTER_LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
 
-def get_chefs_form_version(base_url, form_id, api_key):
+def chefs_api_request(base_url, endpoint, form_id, api_key, params=None):
     """
-    Retrieves the published version of the CHEFS form.
+    Makes a GET request to the CHEFS API.
 
-    Returns: the version ID of the published form.
-    """
-
-    v = requests.get(f"{base_url}/{form_id}/version", auth=(form_id, api_key))
-    if v.status_code == 200:
-        logging.info("Form version fetched successfully")
-        version_data = v.json()
-        version_id = version_data['versions'][0]['id']
-        return version_id
-    else:
-        logging.error(f"Failed to fetch form version: {v.status_code} - {v.text}")
-
-
-def get_chefs_field_names(base_url, version_id, form_id, api_key, hidden_fields):
-    """
-    Retrieves field names for a specific CHEFS form version, including hidden fields that are not returned by the API.
-
-    Returns: a comma-separated string of field names.
+    Returns: the JSON response if the request is successful, otherwise logs an error and exits.
     """
 
-    f = requests.get(f"{base_url}/{form_id}/versions/{version_id}/fields", auth=(form_id, api_key))
-    if f.status_code == 200:
-        logging.info("Field names fetched successfully")
-        field_names = f.json()
-        for hidden_field in hidden_fields:
-            field_names.append(hidden_field)
-        chefs_fields = ",".join(field_names)
-        return chefs_fields
-    else:
-        logging.error(f"Failed to fetch field names: {f.status_code} - {f.text}")
-        sys.exit()
+    url = f"{base_url}/{form_id}/{endpoint}"
 
-def get_chefs_submissions(base_url, form_id, api_key, fields):
-    """
-    Retrieves submissions for a specific CHEFS form, including only the fields retrieved from the form version used in get_chefs_field_names.
-
-    Returns: a pandas DataFrame containing the submissions.
-    """
-
-    r = requests.get(f"{base_url}/{form_id}/submissions", auth=(form_id, api_key), params={"fields": fields})
+    r = requests.get(url, auth=(form_id, api_key), params=params)
 
     if r.status_code == 200:
-        logging.info("Submissions fetched successfully")
-        data = r.json()
-        chefs_df = pd.json_normalize(data)
-
-        logging.info(f"Removing deleted submissions from the DataFrame")
-        chefs_df = chefs_df[chefs_df['deleted'] == False]
-
-        return chefs_df
+        logging.info(f"Request to {endpoint} successful")
+        return r.json()
     else:
-        logging.error(f"Failed to fetch submissions: {r.status_code} - {r.text}")
+        logging.error(f"Failed to fetch {url}: {r.status_code} - {r.text}")
+        sys.exit()
 
 if __name__ == "__main__":
     logging.info("Fetching the published version ID of the CHEFS form")
-    version_id = get_chefs_form_version(BASE_URL, FORM_ID, API_KEY)
+    version_data = chefs_api_request(base_url=BASE_URL, 
+                                     endpoint="version", 
+                                     form_id=FORM_ID, 
+                                     api_key=API_KEY)
+    
+    # extract version ID from the response
+    version_id = version_data['versions'][0]['id']
+    logging.info(f"Published version ID: {version_id}")
 
-    logging.info(f"Fetching field names for form verion {version_id}")
-    chefs_fields = get_chefs_field_names(BASE_URL, version_id, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
+    logging.info("Fetching the published version ID of the CHEFS form")
+    field_name_data = chefs_api_request(base_url=BASE_URL,
+                                        endpoint=f"versions/{version_id}/fields",
+                                        form_id=FORM_ID,
+                                        api_key=API_KEY)
+    
+    # add hidden fields to the list of field names as they are not returned by the API
+    for hidden_field in CHEFS_HIDDEN_FIELDS:
+        field_name_data.append(hidden_field)
+    # format the field names into a comma-separated string
+    chefs_fields = ",".join(field_name_data)
 
-    logging.info("Fetching submissions from the form")
-    chefs_df = get_chefs_submissions(BASE_URL, FORM_ID, API_KEY, chefs_fields)
+    logging.info("Fetching CHEFS submissions")
+    chefs_data = chefs_api_request(base_url=BASE_URL,
+                                   endpoint="submissions",
+                                   form_id=FORM_ID,
+                                   api_key=API_KEY,
+                                   params={"fields": chefs_fields})
+    
+    # convert json reponse to dataframe
+    chefs_df = pd.json_normalize(chefs_data)
+    # remove deleted submissions from the dataframe
+    chefs_df = chefs_df[chefs_df['deleted'] == False]
