@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 FORM_ID = os.getenv("CHEFS_FORM_ID")
 API_KEY = os.getenv("CHEFS_API_KEY")
 BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
-CHEFS_HIDDEN_FIELDS = ["HUNTER_LATITUDE_DD_CALC","HUNTER_LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
+CHEFS_HIDDEN_FIELDS = ["LATITUDE_DD_CALC","LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
 
 def chefs_api_request(base_url, endpoint, form_id, api_key, params=None):
     """
@@ -29,7 +29,7 @@ def chefs_api_request(base_url, endpoint, form_id, api_key, params=None):
         logging.error(f"Failed to fetch {url}: {r.status_code} - {r.text}")
         sys.exit()
 
-if __name__ == "__main__":
+def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     logging.info("Fetching the published version ID of the CHEFS form")
     version_data = chefs_api_request(base_url=BASE_URL, 
                                      endpoint="version", 
@@ -63,3 +63,5 @@ if __name__ == "__main__":
     chefs_df = pd.json_normalize(chefs_data)
     # remove deleted submissions from the dataframe
     chefs_df = chefs_df[chefs_df['deleted'] == False]
+
+    return chefs_df
