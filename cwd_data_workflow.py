@@ -28,6 +28,7 @@ warnings.simplefilter(action='ignore')
 
 import os, sys
 import re
+import requests
 import boto3
 import botocore
 import json
@@ -95,6 +96,23 @@ def s3_file_exists_check(s3_client, bucket_name, key):
             return False
         else:
             raise
+
+def chefs_api_request(base_url, endpoint, form_id, api_key, params=None):
+    """
+    Makes a GET request to the CHEFS API.
+
+    Returns: the JSON response if the request is successful, otherwise logs an error and exits.
+    """
+
+    url = f"{base_url}/{form_id}/{endpoint}"
+
+    r = requests.get(url, auth=(form_id, api_key), params=params)
+
+    if r.status_code == 200:
+        logging.info(f"Request to {endpoint} successful")
+        return r.json()
+    else:
+        logging.error(f"Failed to fetch {url}: {r.status_code} - {r.text}")
 
 
 def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_index_num=None,required_headers=None, sheet_name=0):
@@ -245,7 +263,6 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     # So keep as UTC in case the data is re-imported to AGO.
     save_xlsx_to_os(s3_client, 'whcwdd', hunter_df, f'hunter_survey/ago_backups/cwd_hunter_survey_data_from_ago_backup_{current_datetime_str}.xlsx')
 
-
     #Convert UTC Date Times from AGO to Pacific Time
     for col in ['CreationDate','EditDate','HUNTER_MORTALITY_DATE','HUNTER_SUBMIT_DATE_TIME']:  
         # Convert to datetime and localize to UTC
@@ -258,6 +275,46 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     logging.info(f"Number of Hunter Survey Records from AGO:  {len(hunter_df)}")
 
     return hunter_df
+
+def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
+    logging.info("Fetching the published version ID of the CHEFS form")
+    version_data = chefs_api_request(base_url=BASE_URL, 
+                                     endpoint="version", 
+                                     form_id=FORM_ID, 
+                                     api_key=API_KEY)
+    
+    # extract version ID from the response
+    version_id = version_data['versions'][0]['id']
+    logging.info(f"..published version ID: {version_id}")
+
+    logging.info("..fetching the published version ID of the CHEFS form")
+    field_name_data = chefs_api_request(base_url=BASE_URL,
+                                        endpoint=f"versions/{version_id}/fields",
+                                        form_id=FORM_ID,
+                                        api_key=API_KEY)
+    
+    # add hidden fields to the list of field names as they are not returned by the API
+    for hidden_field in CHEFS_HIDDEN_FIELDS:
+        field_name_data.append(hidden_field)
+    # format the field names into a comma-separated string
+    chefs_fields = ",".join(field_name_data)
+
+    logging.info("..fetching CHEFS submissions")
+    chefs_data = chefs_api_request(base_url=BASE_URL,
+                                   endpoint="submissions",
+                                   form_id=FORM_ID,
+                                   api_key=API_KEY,
+                                   params={"fields": chefs_fields})
+    
+    # convert json reponse to dataframe
+    chefs_df = pd.json_normalize(chefs_data)
+    # remove deleted submissions from the dataframe
+    chefs_df = chefs_df[chefs_df['deleted'] == False]
+
+    logging.info("..saving CHEFS data to object storage")
+    save_xlsx_to_os(s3_client, 'whcwdd', hunter_df, f'chefs_survey/cwd_hunter_survey_data_from_chefs_backup_{current_datetime_str}.xlsx')
+
+    return chefs_df
 
 def get_ago_flayer(ago_flayer_id):
     """
@@ -365,7 +422,6 @@ def process_master_dataset(df):
     df = df.apply(lambda row: latlong_from_Region(row, df_rg), axis=1)
       
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df['SPATIAL_CAPTURE_DESCRIPTOR'].fillna('Unknown')
-
 
     # Remove spaces from FWID (string) between numbers
     df['FWID'] = df['FWID'].str.strip()  #remove any leading and trailing spaces for all records
@@ -932,7 +988,7 @@ def find_and_save_duplicates(df, fld, output_path):
 
 
 
-def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, latcol):
+def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipality_sdf, buffer_distance, longcol, latcol):
     """
     Flags points where the sampling MU or Region does not match the spatial MU or Region.
     Note that there may be cases where the point is very close to a Region or MU border.
@@ -941,10 +997,10 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
 
     Add new fields to the master xls and FL for QA checks - QA_REG_WMU_CHECK, (QA_REG_WMU_CHECK_DATE_TIME)
     """
-    # convert MU and Region feature layers to geodataframes
+    # convert MU, Region, and Municipality feature layers to geodataframes
     mu_gdf = gpd.GeoDataFrame(mu_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['WILDLIFE_MGMT_UNIT_ID', 'SHAPE']]
     rg_gdf = gpd.GeoDataFrame(rg_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['REGION_NAME', 'SHAPE']]
-
+    municipality_gdf = gpd.GeoDataFrame(municipality_sdf, geometry='SHAPE', crs="EPSG:3005")[['ADMIN_AREA_ABBREVIATION', 'SHAPE']]
     
     df_length = len(df_wh)
     df = df_wh.dropna(subset=[latcol, longcol])
@@ -971,6 +1027,8 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
 
     sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
 
+    # drop the index column to prep for the next spatial join
+    sjoin_gdf = sjoin_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
 
     # compare columns and update flags
     logging.info("..updating flags")
@@ -995,6 +1053,23 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
                                                     (sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'] != sjoin_gdf['WMU']),
                                                     sjoin_gdf['QA_REG_WMU_CHECK'].fillna('') + ', WMU',
                                                     sjoin_gdf['QA_REG_WMU_CHECK'])
+
+    logging.info("..adding municipalities")
+    logging.info(f"..buffering municipality boundaries by {buffer_distance} in EPSG:3005")
+    municipality_gdf['geometry'] = municipality_gdf.geometry.buffer(buffer_distance)
+
+    logging.info("..projecting Municipality gdf from EPSG:3005 to EPSG:4326")
+    municipality_gdf = municipality_gdf.to_crs("EPSG:4326")
+
+    # spatial join the municipality boundaries to the CWD spatial gdf
+    logging.info(f"..spatial joining master gdf to municipality boundaries")
+    sjoin_gdf = gpd.sjoin(sjoin_gdf, municipality_gdf, how='left', predicate='intersects')
+
+    # change NRRM Municipality name to Northern Rockies clarity
+    sjoin_gdf.loc[sjoin_gdf['ADMIN_AREA_ABBREVIATION']=='NRRM', 'ADMIN_AREA_ABBREVIATION'] = 'Northern Rockies'
+
+    # TODO: change NRRM to longer name 
+    # TODO: flag points w/ MUNICIPALITY_NAME that fall outside the muni buffer. Only if Cranbook, Invermere, Kimberley. Do we need a FLAG field? 
     
     # Update QA_REG_WMU_CHECK if there are hanging commas
     def update_error_desc(desc):
@@ -1006,7 +1081,7 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
     
     # drop joined columns
     # sjoin_df = sjoin_gdf.drop(['geometry', 'index_left', 'index_right', 'WILDLIFE_MGMT_UNIT_ID', 'REGION_NAME'], axis=1, errors='ignore')
-    sjoin_df = sjoin_gdf.drop(['geometry', 'index_left', 'index_right'], axis=1, errors='ignore')
+    sjoin_df = sjoin_gdf.drop(['geometry', 'geometry_left', 'geometry_right', 'index_left', 'index_right'], axis=1, errors='ignore')
 
     """
     # append the rows with Unknown locations back to the dataframe
@@ -1017,7 +1092,8 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
     # Rename spatial columns
     sjoin_df = sjoin_df.rename(columns={
         'WILDLIFE_MGMT_UNIT_ID': 'WMU_SPATIAL',
-        'REGION_NAME': 'ENV_REGION_SPATIAL'
+        'REGION_NAME': 'ENV_REGION_SPATIAL',
+        'ADMIN_AREA_ABBREVIATION': 'UPDATED_MUNICIPALITY'
     })
 
     #Get select columns
@@ -1042,6 +1118,8 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
         "ENV_REGION_SPATIAL",
         "WMU",
         "WMU_SPATIAL",
+        "MUNICIPALITY_NAME",
+        "UPDATED_MUNICIPALITY",
         "QA_REG_WMU_CHECK",
         "QA_REG_WMU_CHECK_DATE_TIME",
         "QA_REG_WMU_CHECK_STATUS",
@@ -1098,7 +1176,7 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, longcol, l
     #save_xlsx_to_os(s3_client, 'whcwdd', mu_reg_flagged, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
 
     # Add QA_REG_WMU_CHECK to master sampling df
-    df_wh = df_wh.merge(mu_reg_flagged[['WLH_ID','QA_REG_WMU_CHECK']], on='WLH_ID', how='left')
+    df_wh = df_wh.merge(mu_reg_flagged[['WLH_ID','QA_REG_WMU_CHECK', 'UPDATED_MUNICIPALITY']], on='WLH_ID', how='left')
     df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')   #Move to last column
     
     return df_wh, mu_reg_flagged
@@ -1914,10 +1992,18 @@ if __name__ == "__main__":
     #AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
     AGO_HUNTER_ITEM_ID = '107b4486f0674f0e8837f0745e49c194'  
     hunter_df = get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID)
+
+    logging.info('\nGetting Hunter Survey Data from CHEFS')
+    BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
+    FORM_ID = os.getenv("CHEFS_FORM_ID")
+    API_KEY = os.getenv("CHEFS_API_KEY")
+    CHEFS_HIDDEN_FIELDS = ["LATITUDE_DD_CALC","LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
+    chefs_df = get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
     
-    logging.info('\nGetting MU and Region data from AGOL Feature Layers')
+    logging.info('\nGetting MU, Region, and Municipality data from AGOL Feature Layers')
     mu_flayer_lyr, mu_flayer_fset, mu_features, mu_flayer_sdf = get_ago_flayer('0b81e46151184058a88c701853e09577')
     rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
+    muni_flayer_lyr, muni_flayer_fset, muni_features, muni_flayer_sdf = get_ago_flayer('e02cefad37f344008f0696663630e134')
 
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
@@ -1938,7 +2024,7 @@ if __name__ == "__main__":
     find_and_save_duplicates(df_wh,'WLH_ID', f'qa/duplicate_ids/cwd_master_sampling_wh_id_duplicates.xlsx')
     
     logging.info('\nChecking for mismatches between entered MU and Region and spatial location')
-    df_wh, mu_reg_flagged = check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, 'MAP_LONGITUDE', 'MAP_LATITUDE')
+    df_wh, mu_reg_flagged = check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, muni_flayer_sdf, buffer_distance=50, longcol='MAP_LONGITUDE', latcol='MAP_LATITUDE')
 
     logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
     update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
