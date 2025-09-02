@@ -21,8 +21,6 @@
 #
 # Created:     2024-08-15
 # Updates ongoing - see GitHub for details.  https://github.com/bcgov/nr-wildlife-health-cwd 
-
-# TEST
 #-------------------------------------------------------------------------------
 
 import warnings
@@ -124,7 +122,7 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
     The incoming xls files must have required columns (e.g., WLH_ID, CWD_EAR_CARD_ID)  or a stable header_index_num.
     The incoming xls files must have a WLH_ID column.
 
-    Will looks for files in the specified folder, or recursively in all subfolders.
+    Will looks for in the specified folder, or recursively in all subfolders.
 
     This is a more generic function that replaces the previously used get_incoming_data_from_os() function.
 
@@ -144,8 +142,7 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
     for page in paginator.paginate(Bucket=bucket_name, Prefix=folder):
         for obj in page.get('Contents', []):
             key = obj['Key']
-            #if key.endswith('.xlsx') and file_text in key.lower():
-            if key.endswith('.xlsx') and 'cwd_sample_collection_01april2023_to_11aug2025_master_dataset_20250815' in key.lower():  #For testing
+            if key.endswith('.xlsx') and file_text in key.lower():
                 try:
                     logging.info(f"...reading file: {key}")
                     obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
@@ -196,8 +193,7 @@ def get_incoming_data_from_os(s3_client):   #Use the new append_xls_files_from_o
         for page in paginator.paginate(Bucket=bucket_name):
             for obj in page.get('Contents', []):
                 key = obj['Key']
-                #if key.endswith('.xlsx') and 'cwd_lab_submissions' in key.lower():
-                if key.endswith('.xlsx') and 'cwd_allresults_1april2023_to_29july2024_20240913' in key.lower():  #For testing
+                if key.endswith('.xlsx') and 'cwd_lab_submissions' in key.lower():
                     try:
                         logging.info(f"...reading file: {key}")
                         obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
@@ -221,7 +217,7 @@ def get_incoming_data_from_os(s3_client):   #Use the new append_xls_files_from_o
 
 def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
     """
-    Returns dataframes of lookup tables for Region and MU centroid locations
+    Returns dataframes of lookup tables
     """
     response = s3_client.list_objects_v2(Bucket=bucket_name)
     
@@ -322,7 +318,7 @@ def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
 
 def get_ago_flayer(ago_flayer_id):
     """
-    Returns AGO feature layers features and spatial dataframe
+    Returns AGO feature layers features and spatial datafram
 
     Input:
     -ago_flayer_id:  AGO item ID for the feature layer
@@ -767,10 +763,6 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     #Sort
     df_wh = df_wh.sort_values(by=['WLH_ID'])
 
-    #Add Time difference fields - calculate the number of days between key date fields where values are not null
-    df_wh['DAYS_DIFF_SAMPLED_SENT'] = (df_wh['SAMPLE_DATE_SENT_TO_LAB'] - df_wh['SAMPLED_DATE']).dt.days
-    df_wh['DAYS_DIFF_SENT_RESULTS'] = (df_wh['CWD_TEST_STATUS_DATE'] - df_wh['SAMPLE_DATE_SENT_TO_LAB']).dt.days
-
     logging.info(f"\n\t{len(df_wh.index)}... records in df_wh - master sampling dataset with hunter survey matches")
     logging.info(f"\t{len(hs_merged_df.index)}... records in hs_merged_df - hunter survey records")
     logging.info(f"\t{len(flagged_hs_df.index)}... records in flagged_hs_df - flagged hunter survey qa records \n")
@@ -1001,11 +993,9 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
     Flags points where the sampling MU or Region does not match the spatial MU or Region.
     Note that there may be cases where the point is very close to a Region or MU border.
     
-    This is only for records where the UPDATED_SPATIAL_CAPTURE_DESCRIPTOR is Hunter Survey or From Submitter i.e. not for centroid based locations where there is no lat/long available.
+    This is only for records where the MAP_SOURCE_DESCRIPTOR is Hunter Survey or From Submitter i.e. not for centroid based locations.
 
     Add new fields to the master xls and FL for QA checks - QA_REG_WMU_CHECK, (QA_REG_WMU_CHECK_DATE_TIME)
-
-    Add fields for updated/calculated Region and WMU.
     """
     # convert MU, Region, and Municipality feature layers to geodataframes
     mu_gdf = gpd.GeoDataFrame(mu_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['WILDLIFE_MGMT_UNIT_ID', 'SHAPE']]
@@ -1262,57 +1252,31 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
 
     return
 
-def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_features, summ_zones_sdf):
+def sampled_summary_by_unit(df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_features, summ_zones_sdf):
     """
     Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MOE Region
-    Add Counts: by fiscal year field, and overall total.
     Export to excel in object storage.
-    Update values in existing AGO feature layer.
-
+    Update values in AGO.
     """ 
 
     logging.info(f'\nSummarizing Data by...{df_sum_fld} and joining to the AGO Feature Layer' )
-    #df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
-    #logging.info(f'CWD_SAMPLED_IND = Yes:  {len(df_sampled)}')
+    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+    logging.info(f'CWD_SAMPLED_IND = Yes:  {len(df_sampled)}')
 
 
     # Filter columns to include
-    df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND', 'FISCAL_YEAR','GIS_LOAD_VERSION_DATE']]
-    #print(df_unit_sampled.dtypes
-    #print(df_unit_sampled.head(20))
-
-   #Group by the spatial unit field and count the total number of samples
-    df_unit_tot_count = df_unit_sampled.groupby([df_sum_fld,'GIS_LOAD_VERSION_DATE'])['CWD_SAMPLED_IND'].count().reset_index(name='CWD_SAMPLE_COUNT') 
-    # Group by FISCAL_YEAR
-    df_unit_fiscal_count = df_unit_sampled.groupby([ df_sum_fld,'FISCAL_YEAR' ])['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
-    df_pivot = df_unit_fiscal_count.pivot(index=df_sum_fld, columns='FISCAL_YEAR', values='Sample_Count')
-    #Rename fiscal column headers with CWD_SAMPLE_COUNT_F prefix
-    df_pivot.columns = [
-        f"CWD_SAMPLE_COUNT_F{str(col).replace('-', '_')}" if str(col)[0].isdigit() else col
-        for col in df_pivot.columns
-    ]
-    
-    # Merge both DataFrames
-    df_unit_count = df_unit_tot_count.merge(df_pivot, on=df_sum_fld, how='outer')  
-   
-    #df_unit_count = pd.concat([df_unit_tot_count, df_pivot], ignore_index=True)
+    df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND']]
+    #Group by the spatial unit field and count the number of samples
+    df_unit_count = df_unit_sampled.groupby(df_sum_fld)['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
     df_unit_count = df_unit_count.sort_values(by=[df_sum_fld])
-    df_unit_count = df_unit_count.fillna(0)   #Fill any NaN values with 0
-
-    #Ensure these are integer values
-    int_cols = [col for col in df_unit_count.columns if str(col).startswith("CWD_SAMPLE_COUNT")]
-    df_unit_count[int_cols] = df_unit_count[int_cols].astype(int)
-
+    #Add a field to store the GIS_LOAD_VERSION_DATE
+    df_unit_count['GIS_LOAD_VERSION_DATE'] = current_datetime
     #print(f'Number of summary units with sampled data for {df_sum_fld}: {df_unit_count}')
 
-    #print(df_unit_count.dtypes)
-    #print(df_unit_count.head(20))
-
-
-    ## Save the summary to a file in object storage (overwrites an existing file)
-    summary_file_name = (df_sum_fld.lower()) +'_rollup_summary.xlsx'
+    ## Save the summary to a file in object storage
     logging.info(f'\nSaving the Rollup summaries...')
     bucket_name='whcwdd'
+    summary_file_name = (df_sum_fld.lower()) +'_rollup_summary.xlsx'
     save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/spatial_rollup/'+summary_file_name)
     
 
@@ -1333,17 +1297,11 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
     
     #Update cursor using the summary df directly (vs converting it to a hosted table in AGO)
     #First, set default Feature Layer rollup to 0 and the current date/time
-    ''' 
     uCount = 0
     logging.info("\nCalculating default values for Feature Layer...this could take awhile...")
     for feature in summ_zones_features:
         try:
-            for col in int_cols:
-                if col in feature.attributes:
-                    feature.attributes[col] = 0
-                else:
-                    logging.info(f"Warning: {col} not found in feature attributes!!")
-
+            feature.attributes['CWD_SAMPLE_COUNT'] = 0
             feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded
             summ_zones_lyr.edit_features(updates=[feature])
             uCount = uCount + 1
@@ -1352,55 +1310,20 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
             logging.info(f'\nExiting...\n')
             sys.exit()
             #continue
-    '''
 
-    
-    # Get the list of existing fields in the layer
-    existing_fields = [f['name'] for f in summ_zones_lyr.properties.fields]
-
-    # Loop through your target columns and update only if target column exists
-    # Note that if fiscal year is beyond 2025-26, you'll have to add a field in the feature layer!
-    logging.info("\nCalculating default values for Feature Layer...")
-    for col in int_cols:
-        if col in existing_fields:
-            try:
-                summ_zones_lyr.calculate(
-                    where="1=1",  # Applies to all features
-                    calc_expression={"field": col, "value": 0}
-                )
-            except Exception as e:
-                logging.info(f"Could not calculate default values for {col}. Exception: {e}")
-                continue
-        else:
-                logging.info(f"Warning: {col} not found in layer fields!!")
-    
-    # Update the date field if it exists
-    #print(current_datetime)
-    if 'GIS_LOAD_VERSION_DATE' in existing_fields:
-        summ_zones_lyr.calculate(
-            where="1=1",
-            calc_expression={"field": "GIS_LOAD_VERSION_DATE", "value": current_datetime}
-        )
-    else:
-        logging.info("Warning: GIS_LOAD_VERSION_DATE not found in layer fields!!")
-    
-                          
-    logging.info(f"DONE Calculating default values for all records!")
+    logging.info(f"DONE Calculating default values for {uCount} records!")
     
 
-    logging.info(f'\nUpdating the AGO Feature Layer with the summary data...')
+    logging.info(f'Updating the AGO Feature Layer with the summary data...')
     #Then update the Feature Layer with the summary data for matching records
     uCount = 0   #reset counter
     for UNIT_ID in overlap_rows[fl_sum_fld]:
         try:
             summ_feature = [f for f in summ_zones_features if f.attributes[fl_sum_fld] == UNIT_ID][0]  #get the spatial feature
             summary_row = df_unit_count.loc[df_unit_count[df_sum_fld] == UNIT_ID]#,['Sample_Count']] #get the dataframe summary row
-
-            for col in int_cols:
-                if col in existing_fields:
-                    summary_val = summary_row[col].values[0]  #get the sample count value
-                    #print(summary_val)
-                    summ_feature.attributes[col] = str(summary_val)
+            summary_val = summary_row['Sample_Count'].values[0]  #get the sample count value
+            #print(summary_val)
+            summ_feature.attributes['CWD_SAMPLE_COUNT'] = str(summary_val)
             #summ_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
             summ_zones_lyr.edit_features(updates=[summ_feature])
             #print(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}", flush=True)
@@ -1435,13 +1358,9 @@ def backup_master_dataset(s3_client, bucket_name):
 def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str):
     """
     Saves an xls containing information for the CWD webpage to publish test results.
-    Exclude: Non-negative and Positive Statuses
-
-    Aug-2025:   Keep DROPOFF_LOCATION and add CWD_NOT_SAMPLED_REASON
-
     """
 
-    # delete existing XLS files in the share_Web folder
+    # delete existing XLS files in the to_Web folder
     try:
         # collect XLS file keys to delete
         response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
@@ -1473,12 +1392,11 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
                   'DROPOFF_LOCATION',
                   'SPECIES',
                   'SEX',
-                  'UPDATED_WMU',  #WMU
+                  'WMU',
                   'MORTALITY_DATE',
                   'SAMPLED_DATE',
-                  'CWD_TEST_STATUS',
-                  'CWD_NOT_SAMPLED_REASON',
-                  'GIS_LOAD_VERSION_DATE']]  
+                  'CWD_TEST_STATUS']]
+                  #'GIS_LOAD_VERSION_DATE']]  
     
     #print(df_wb.dtypes)
     #print (df_wb)
@@ -1500,15 +1418,14 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
         'DROPOFF_LOCATION': 'Drop-off Location',
         'SPECIES': 'Species',
         'SEX': 'Sex',
-        'UPDATED_WMU': 'Management Unit',
+        'WMU': 'Management Unit',
         'MORTALITY_DATE': 'Mortality Date',
         'SAMPLED_DATE': 'Sample Date',
-        'CWD_TEST_STATUS': 'CWD Status',
-        'CWD_NOT_SAMPLED_REASON': 'Reason for Not Sampling',
-        'GIS_LOAD_VERSION_DATE': 'GIS Load Version Date'
+        'CWD_TEST_STATUS': 'CWD Status'
     })
 
     
+
     #File is named with the GIS_LOAD_VERSION_DATE (aka current_datetime string)
     file_key = f"{folder}cwd_sampling_results_for_public_web_{current_datetime_str}.xlsx"
 
@@ -1699,20 +1616,20 @@ def save_tongue_sample_data(df_wh,df_tng_new):
 
 def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     """
-    Publishes the master dataset to AGO, overwriting data if it already exists.
+    Publishes the master dataset to AGO, overwriting if it already exists.
 
     CHECK:  why are numeric types in data dictionary being replaced with string types? Is
     this related to filling with length 25 by default?  Or does a blank feature template have to 
     be created first if string types cannot be converted to numeric types?
 
-    CHECK:  why is feature layer always getting newly created instead of updating the existing one, according to the message?
+    CHECK:  why is feature layer always getting newly created instead of updating the existing one?
     """
-    # Cleanup the master dataset df before publishing
+    # Cleanup the master dataset before publishing
     df = df.dropna(subset=[latcol, longcol])
     df = df.astype(str)
 
     # Drop personal info fields from the dataset
-    drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID','STATUS_ID']
+    drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID']
     df = df.drop(columns=[col for col in drop_cols if col in df.columns])
 
 
@@ -1729,13 +1646,11 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     '''# DO NOT USE - this converts to string types, which are not compatible with AGO (and PowerBI?)
     date_columns = df.columns[df.columns.str.contains('DATE')]
     date_columns_convert = ['COLLECTION_DATE','MORTALITY_DATE','SAMPLED_DATE','SAMPLE_DATE_SENT_TO_LAB','REPORTING_LAB_DATE_RECEIVED','CWD_TEST_STATUS_DATE','PREP_LAB_LAB_DATE_RECEIVED','PREP_LAB_DATE_FORWARDED']
-    
     for col in date_columns_convert:
         df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08                                                                       
     '''
 
     #Convert numeric column types and fill empty numeric values with zero
-    #Note:  These are the fields with numeric domain values (see domains_dict)
     float_cols = ['SAMPLE_CWD_TONSIL_NUM', 'SAMPLE_CWD_RPLN_NUM', 'SAMPLE_PLN_NUM', 'SAMPLE_MLN_NUM']
     int_cols = ['SAMPLE_COVID_SWAB_NUM','SAMPLE_NOBUTO_NUM']
     zero_cols = float_cols + int_cols
@@ -1804,12 +1719,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         for item in existing_items:
             if item.type == 'Feature Layer':
                 feature_layer_item = item
-                break   # Exit loop after finding the first feature layer
-
-        print(f"\nFound {len(existing_items)} existing items with title '{title}'")
-        print(feature_layer_item)
-
-        sys.exit()
+                break
 
         # Create a new GeoJSON item
         geojson_item_properties = {
@@ -1823,12 +1733,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         new_geojson_item = gis.content.add(item_properties=geojson_item_properties, data=geojson_file, folder=folder)
 
         # Update the existing feature layer or create a new one if it doesn't exist
-        #  CHECK!   This seems to always use the second method using overwrite, instead of using .update() method.
-        if feature_layer_item: #and feature_layer_item.type == 'Feature Layer':
-            logging.info(f"..found existing feature layer '{feature_layer_item.title}'")
-        if feature_layer_item and feature_layer_item.type == 'Feature Layer':
-            logging.info(f"..found existing feature layer '{feature_layer_item.title}'")
-
+        #  CHECK!   Is this always creating a new feature layer?  Or is it updating the existing one?
         if feature_layer_item:
             feature_layer_item.update(data=new_geojson_item, folder=folder)
             logging.info(f"..existing feature layer '{title}' updated successfully.")
@@ -2098,12 +2003,7 @@ if __name__ == "__main__":
     logging.info('\nGetting MU, Region, and Municipality data from AGOL Feature Layers')
     mu_flayer_lyr, mu_flayer_fset, mu_features, mu_flayer_sdf = get_ago_flayer('0b81e46151184058a88c701853e09577')
     rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
-<<<<<<< Updated upstream
     muni_flayer_lyr, muni_flayer_fset, muni_features, muni_flayer_sdf = get_ago_flayer('e02cefad37f344008f0696663630e134')
-=======
-    # DELETE rg_fiscal_flayer_lyr, rg_fiscal_flayer_fset, rg_fiscal_features, rg_fiscal_flayer_sdf = get_ago_flayer('cdeaf3f9ffd448dfbf4079a8c99bef4f')
-    
->>>>>>> Stashed changes
 
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
@@ -2112,9 +2012,9 @@ if __name__ == "__main__":
     df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, hunter_df)
 
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
-    #updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
+    updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
 
-    '''
+    #'''
     logging.info('\nUpdating the AGO Hunter Survey Feature Layer with the latest QA flags')
     update_hunter_flags_to_ago(hs_merged_df, updated_tracking_df, AGO_HUNTER_ITEM_ID)
 
@@ -2128,16 +2028,15 @@ if __name__ == "__main__":
 
     logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
     update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
-    
+    #'''
 
     logging.info('\nSaving the Master Dataset xlsx to Object Storage')
     bucket_name='whcwdd'   # this points to GeoDrive
     backup_master_dataset(s3_client, bucket_name) #backup
     ##save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
     save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
-    '''
 
-    '''
+
     logging.info('\nInitiating .... Saving an XLSX of sampling results for the webpage')
     # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
     # #folder = 'Web/'       # this points to BCBOX
@@ -2179,13 +2078,10 @@ if __name__ == "__main__":
     domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
-    '''
-    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
-    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
 
-    logging.info(f'CWD_SAMPLED_IND = Yes:  {len(df_sampled)}')
-    #sampled_summary_by_unit(df_sampled,'ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
-    sampled_summary_by_unit(df_sampled,'WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
+    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
+    sampled_summary_by_unit('ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
+    sampled_summary_by_unit('WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
     
 
     finish_t = timeit.default_timer() #finish time
