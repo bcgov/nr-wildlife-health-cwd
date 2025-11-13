@@ -238,8 +238,8 @@ if __name__ == "__main__":
     
     logging.info('Connecting to Object Storage')
     S3_ENDPOINT = os.getenv('S3_ENDPOINT')
-    S3_CWD_ACCESS_KEY = os.getenv('S3_CWD_ACCESS_KEY')
-    S3_CWD_SECRET_KEY = os.getenv('S3_CWD_SECRET_KEY')
+    S3_CWD_ACCESS_KEY = os.getenv('S3_CWD_ACCESS_KEY')  #Prod
+    S3_CWD_SECRET_KEY = os.getenv('S3_CWD_SECRET_KEY')  #Prod
     s3_client = connect_to_os(S3_ENDPOINT, S3_CWD_ACCESS_KEY, S3_CWD_SECRET_KEY)
 
     logging.info('\nConnecting to AGO')
@@ -250,7 +250,7 @@ if __name__ == "__main__":
     
     if s3_client:
         logging.info('\nRetrieving drop-off locations from Object Storage')
-        df, fprop_dict= get_dropoff_locations(s3_client, bucket_name='whcwdd')
+        df, fprop_dict= get_dropoff_locations(s3_client, bucket_name='whcwdp')  #Prod bucket
 
     logging.info('\nPublishing Drop-off locations to AGO')
     title='Animal Specimen Drop-off Locations for Chronic Wasting Disease Testing - Points'

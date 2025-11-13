@@ -85,14 +85,14 @@ def connect_to_AGO (HOST, USERNAME, PASSWORD):
     
     return gis
 
-def s3_file_exists_check(s3_client, bucket_name, key):
+def s3_file_exists_check(s3_client, s3_bucket_name, key):
     try:
-        s3_client.head_object(Bucket=bucket_name, Key=key)
-        logging.info(f"File {key} EXISTS in bucket {bucket_name}")
+        s3_client.head_object(Bucket=s3_bucket_name, Key=key)
+        logging.info(f"File {key} EXISTS in bucket {s3_bucket_name}")
         return True
     except botocore.exceptions.ClientError as e:
         if e.response['Error']['Code'] == "404":
-            logging.info(f"File {key} DOES NOT EXIST in bucket {bucket_name}")
+            logging.info(f"File {key} DOES NOT EXIST in bucket {s3_bucket_name}")
             return False
         else:
             raise
@@ -115,18 +115,75 @@ def chefs_api_request(base_url, endpoint, form_id, api_key, params=None):
         logging.error(f"Failed to fetch {url}: {r.status_code} - {r.text}")
 
 
+def convert_datetime(df, columns, strip_time=False, as_string=False, date_format="%Y-%m-%d"):
+    """
+    Convert columns with mixed ISO 8601 formats (Z and offsets) to Pacific Time.
+    Handles Z and offset-based timestamps separately.
+
+    Handles:
+    - Mixed time zones in input (e.g., Z, -06:00, -07:00)
+    - tz-aware and tz-naive values
+    - None or invalid values gracefully
+    
+    Parameters:
+        df (pd.DataFrame): Input DataFrame.
+        columns (str or list): Column name or list of column names to convert.
+        strip_time (bool): If True, keep only the date (YYYY-MM-DD).
+        as_string (bool): If True, return formatted strings instead of datetime/date objects.
+        date_format (str): Format for string output when strip_time=True (default: '%Y-%m-%d').
+    
+    Returns:
+        pd.DataFrame: Updated DataFrame with converted columns.
+
+    """
+    if isinstance(columns, str):
+        columns = [columns]
+
+    # pacific_timezone = pytz.timezone('America/Vancouver')
+
+    for col in columns:
+        converted = pd.Series(index=df.index, dtype="object")
+
+        # Detect Zulu time
+        mask_z = df[col].astype(str).str.endswith("Z", na=False)
+        if mask_z.any():
+            converted[mask_z] = pd.to_datetime(df.loc[mask_z, col], errors="coerce", utc=True)
+
+        # Detect offset time
+        mask_offset = ~mask_z & df[col].notna()
+        if mask_offset.any():
+            converted[mask_offset] = pd.to_datetime(df.loc[mask_offset, col], errors="coerce", utc=True)
+
+        # Convert to Pacific Time
+        converted = pd.to_datetime(converted, errors="coerce", utc=True)
+        converted = converted.dt.tz_convert(pacific_timezone).dt.tz_localize(None)
+
+        # Format output
+        if strip_time:
+            if as_string:
+                converted = converted.apply(lambda x: x.strftime(date_format) if pd.notnull(x) else None)
+            else:
+                converted = converted.dt.date
+        elif as_string:
+            # Include time in string format
+            converted = converted.apply(lambda x: x.strftime("%Y-%m-%d %H:%M:%S") if pd.notnull(x) else None)
+
+        df[col] = converted
+
+    return df
+
 def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_index_num=None,required_headers=None, sheet_name=0):
     """
     Returns an appended df of specific xls files from Object Storage.
-    You must provide either the header_index_num or the required_headers.  This is to account for potentially different header rows in the xls files.
+    Will check that fields match between files.
+    You must provide either the header_index_num or the required_headers.  This is to account for potentially different header row positions in the xls files.
     The incoming xls files must have required columns (e.g., WLH_ID, CWD_EAR_CARD_ID)  or a stable header_index_num.
     The incoming xls files must have a WLH_ID column.
 
-    Will looks for files in the specified folder, or recursively in all subfolders.
+    Will look for files in the specified folder, or recursively in all subfolders.
 
-    This is a more generic function that replaces the previously used get_incoming_data_from_os() function.
-
-    file_text:  text to search for in the xls file name  (stored as lower case is S3)
+    Inputs:
+    file_text:  text to search for in the xls file name  (stored as lower case in S3)
     header_index_num:  row number of the header in the excel file (0 based).  If header_index_num is None, the function will auto-detect the header row by searching for all required_headers.
     required_headers:  list of required headers to check for in the excel file.  If provided, the function will check if all required headers are present in the file.
     sheet_name:  name of the sheet to read from the excel file.  Default of 0, will read the first sheet.
@@ -142,8 +199,8 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
     for page in paginator.paginate(Bucket=bucket_name, Prefix=folder):
         for obj in page.get('Contents', []):
             key = obj['Key']
-            #if key.endswith('.xlsx') and file_text in key.lower():
-            if key.endswith('.xlsx') and 'cwd_sample_collection_01april2023_to_11aug2025_master_dataset_20250815' in key.lower():  #For testing
+            if key.endswith('.xlsx') and file_text in key.lower():
+            #if key.endswith('.xlsx') and 'cwd_sample_collection_01april2023_to_11aug2025_master_dataset_20250815' in key.lower():  #For testing
                 try:
                     logging.info(f"...reading file: {key}")
                     obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
@@ -165,8 +222,25 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
                     file_bytes.seek(0)
                     df = pd.read_excel(file_bytes, header=header_index_num, sheet_name=sheet_name)
                     
-                    df = df[df['WLH_ID'].notna()] #remove empty rows
+                    # Either WLH_ID or CWD_EAR_CARD_ID must be populated
+                    df = df[df['WLH_ID'].notna() | df['CWD_EAR_CARD_ID'].notna()] #remove empty rows
+
+                    # Check that sampling sheet column names match the column names in the Data Dictionary (fprop_dict)
+                    if file_text == 'cwd_sample_collection':
+                        if not df.columns.isin(fprop_dict.keys()).all():
+                            # Log the mismatched columns.
+                            mismatched_cols = df.columns[~df.columns.isin(fprop_dict.keys())]
+                            logging.error(f"Mismatched columns in file {key}: {mismatched_cols.tolist()}\n")
+                            # raise ValueError(f"Dataframe columns do not match field properties in file: {key}")
                     
+                    # Check that subsequent file columns match the columns in the first file
+                    if df_list:
+                        existing_cols = df_list[0].columns  #get columns from first df
+                        if not df.columns.equals(existing_cols):    #order matters
+                        #if not df.columns.isin(existing_cols).all():    #order does not matter
+                            logging.error(f"Column names do not match between files. Mismatched file: {key}\n")
+                            #raise ValueError(f"Column names do not match between files. Mismatched file: {key}")
+                        
                     df_list.append(df)
                 except botocore.exceptions.BotoCoreError as e:
                     logging.error(f"...failed to retrieve file: {e}")
@@ -178,46 +252,9 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
         logging.info("..no dataframes to append")
         return pd.DataFrame()
     
-def get_incoming_data_from_os(s3_client):   #Use the new append_xls_files_from_os() function instead.
-    """
-    Returns a df of incoming data from Object Storage
-    """
-    logging.info("..listing buckets")
-    buckets = s3_client.list_buckets()
-    df_list = []
-    
-    for bucket in buckets['Buckets']:
-        bucket_name = bucket['Name']
-        logging.info(f"..processing bucket: {bucket_name}")
-        
-        paginator = s3_client.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=bucket_name):
-            for obj in page.get('Contents', []):
-                key = obj['Key']
-                #if key.endswith('.xlsx') and 'cwd_lab_submissions' in key.lower():
-                if key.endswith('.xlsx') and 'cwd_allresults_1april2023_to_29july2024_20240913' in key.lower():  #For testing
-                    try:
-                        logging.info(f"...reading file: {key}")
-                        obj_data = s3_client.get_object(Bucket=bucket_name, Key=key)
-                        df = pd.read_excel(BytesIO(obj_data['Body'].read()),
-                                           header=2,
-                                           sheet_name='Sampling Sheet')
-                        df = df[df['WLH_ID'].notna()] #remove empty rows
-                        
-                        df_list.append(df)
-                    except botocore.exceptions.BotoCoreError as e:
-                        logging.error(f"...failed to retrieve file: {e}")
-    if df_list:
-        listlen = len(df_list)
-        logging.info(f"..appending dataframes for {listlen} submission files")
-        return pd.concat(df_list, ignore_index=True)
-    else:
-        logging.info("..no dataframes to append")
-        return pd.DataFrame()
 
 
-
-def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
+def get_lookup_tables_from_os(s3_client, bucket_name):
     """
     Returns dataframes of lookup tables for Region and MU centroid locations
     """
@@ -241,7 +278,9 @@ def get_lookup_tables_from_os(s3_client, bucket_name='whcwdd'):
 
 def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     """
-    Returns a df containing hunter survey data from AGO and manipulate time columns to pacific time vs UTC.
+    Returns a df containing legacy hunter survey123 data from AGO and manipulates time columns to pacific time vs UTC.
+    
+    The Survey123 form is 'retired' so no new data should be coming in, but we keep this function to grab the old data.
     """
 
     # get the ago item
@@ -263,7 +302,9 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     # NOTE THAT Date/times are in UTC!  Cannot export to excel if 'time aware'. 
     # Also, AGO stores date/times in UTC behind the scenes, but would appear as Pacific time in the table.
     # So keep as UTC in case the data is re-imported to AGO.
-    save_xlsx_to_os(s3_client, 'whcwdd', hunter_df, f'hunter_survey/ago_backups/cwd_hunter_survey_data_from_ago_backup_{current_datetime_str}.xlsx')
+    
+    #Disable for now, as Survey123 form is 'retired'
+    #save_xlsx_to_os(s3_client, s3_bucket_name, hunter_df, f'hunter_survey/ago_backups/cwd_hunter_survey_data_from_ago_backup_{current_datetime_str}.xlsx')
 
     #Convert UTC Date Times from AGO to Pacific Time
     for col in ['CreationDate','EditDate','HUNTER_MORTALITY_DATE','HUNTER_SUBMIT_DATE_TIME']:  
@@ -273,13 +314,16 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
         hunter_df[col] = hunter_df[col].dt.tz_convert(pacific_timezone)
         #Then remove time aware, as this is required below.
         hunter_df[col] = hunter_df[col].dt.tz_localize(None)
+
+    # Add field for SURVEY_SOURCE and populate as 'Survey123'
+    hunter_df['SURVEY_SOURCE'] = 'Survey123'
             
     logging.info(f"Number of Hunter Survey Records from AGO:  {len(hunter_df)}")
 
     return hunter_df
 
 def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
-    logging.info("Fetching the published version ID of the CHEFS form")
+    logging.info("\nFetching the published version ID of the CHEFS form")
     version_data = chefs_api_request(base_url=BASE_URL, 
                                      endpoint="version", 
                                      form_id=FORM_ID, 
@@ -310,13 +354,101 @@ def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     
     # convert json reponse to dataframe
     chefs_df = pd.json_normalize(chefs_data)
-    # remove deleted submissions from the dataframe
+    # ignore deleted submissions for the dataframe
     chefs_df = chefs_df[chefs_df['deleted'] == False]
 
-    logging.info("..saving CHEFS data to object storage")
-    save_xlsx_to_os(s3_client, 'whcwdd', hunter_df, f'chefs_survey/cwd_hunter_survey_data_from_chefs_backup_{current_datetime_str}.xlsx')
+    # Force CWD_EAR_CARD_ID to integer
+    chefs_df['CWD_EAR_CARD_ID'] = pd.to_numeric(chefs_df['CWD_EAR_CARD_ID'], errors='coerce').astype('Int64')
 
+    logging.info("..saving raw CHEFS data to object storage")
+    # TOGGLE
+    save_xlsx_to_os(s3_client, s3_bucket_name, chefs_df, f'chefs_survey/cwd_hunter_survey_data_from_chefs_backup_{current_datetime_str}.xlsx')
+
+
+    # print(chefs_df.dtypes)
+    #print(chefs_df[['createdAt','MORTALITY_DATE','SAMPLED_DATE']])
+    # print(chefs_df.head(20))
+    # print(chefs_df.tail(20))
+
+    # Deal with Date/Time columns in CHEFS data and set as pacific time.  Mixed formats in the data.
+    # Convert UTC Date Times  to Pacific Time.  Assumes inputs are Object types.
+    # Store as strings in order to export to excel
+
+    # Keep full datetime for createdAt
+    convert_datetime(chefs_df, ['createdAt'], strip_time=False, as_string=True)
+    # Convert to date only for MORTALITY_DATE and SAMPLED_DATE
+    convert_datetime(chefs_df, ['MORTALITY_DATE', 'SAMPLED_DATE'], strip_time=True, as_string=True)
+
+    
+    #print(chefs_df.dtypes)
+    #print(chefs_df[['createdAt','MORTALITY_DATE','SAMPLED_DATE']])
+
+    # Add field for SURVEY_SOURCE and populate as 'CHEFS'
+    chefs_df['SURVEY_SOURCE'] = 'CHEFS'
+
+    
     return chefs_df
+
+def combine_survey_info(hunter_df, chefs_df, df):
+    """
+    Combines hunter survey data from Legacey AGO Survey123 (old) and CHEFS (new) into a single dataframe.
+    """
+    logging.info("..combining Hunter Survey data from AGO and CHEFS")
+
+    hunter_df_renamed = hunter_df.rename(columns={
+        'HUNTER_MORTALITY_DATE': 'MORTALITY_DATE',
+        'HUNTER_SPECIES': 'SPECIES',
+        'HUNTER_SEX': 'SEX',
+        'HUNTER_LATITUDE_DD': 'LATITUDE_DD_CALC',
+        'HUNTER_LONGITUDE_DD': 'LONGITUDE_DD_CALC',
+        'HUNTER_CWD_EAR_CARD_ID': 'CWD_EAR_CARD_ID',
+        'HUNTER_SUBMIT_DATE_TIME': 'SUBMIT_DATE_TIME'
+    })
+
+
+    # Get list of fields to keep from hunter_df that start with QA_
+    hunter_qa_fields = [col for col in hunter_df.columns if col.startswith('QA_')]
+    #print (hunter_qa_fields)
+    #print("\n----------------")
+
+    # rename chefs_df createdAt column to SUBMIT_DATE_TIME
+    chefs_df = chefs_df.rename(columns={'createdAt': 'SUBMIT_DATE_TIME'})
+    
+    # Combine both dataframes
+    surveys_df = pd.concat([hunter_df_renamed, chefs_df], ignore_index=True)
+    #logging.info(f"Total number of records from Hunter Survey and CHEFS:  {len(surveys_df)}")
+
+    # Prefix all fields except SURVEY_SOURCE and fields in hunter_qa_fields with SURVEY_ to distinguish from master sampling dataset fields when joined later
+    surveys_df = surveys_df.rename(columns=lambda x: f"SURVEY_{x}" if x != "SURVEY_SOURCE" and x not in hunter_qa_fields else x)
+
+    # Add a flag SURVEY_HAS_SAMPLING_MATCH to indicate if there is a matching sampling record in the master dataset
+    surveys_df['SURVEY_HAS_SAMPLING_MATCH'] = 'No'  #default to No.  
+    surveys_df.loc[surveys_df['SURVEY_CWD_EAR_CARD_ID'].isin(df['CWD_EAR_CARD_ID']), 'SURVEY_HAS_SAMPLING_MATCH'] = 'Yes'
+    # Add SURVEY_CWD_EAR_CARD_ID_TEXT field as text and populate with SURVEY_CWD_EAR_CARD_ID, and where blank, fill with 'Not recorded'
+    surveys_df['SURVEY_CWD_EAR_CARD_ID_TEXT'] = surveys_df['SURVEY_CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) else 'Not recorded')
+
+    # Limit and re-order survey columns to only those GIS_FIELD names listed in the df_datadict starting with SURVEY_
+    # Short version for exporting to xls, long version for next processing steps (not including GIS_LOAD_VERSION_DATE)
+    survey_cols_short = [col for col in df_datadict['GIS_FIELD_NAME'] if col.startswith('SURVEY_')]
+    survey_cols_long = survey_cols_short + hunter_qa_fields + ['SURVEY_CWD_EAR_CARD_ID_TEXT']
+    # Filter surveys_df to only the columns in survey_cols_long
+    filtered_surveys_df = surveys_df[[col for col in survey_cols_long if col in surveys_df.columns]]
+
+    #--------------------
+    # TEMP - as needed
+    # Export short list of fields to XLS
+    temp_xls_df = surveys_df[[col for col in survey_cols_short if col in surveys_df.columns]]
+    # Add Temp GIS_LOAD_VERSION_DATE before exporting to excel
+    temp_xls_df['GIS_LOAD_VERSION_DATE'] = current_datetime
+
+    logging.info("..saving Filtered Survey data to object storage")
+    save_xlsx_to_os(s3_client, s3_bucket_name, temp_xls_df, f'master_dataset/combined_survey_results/combined_survey_data.xlsx')
+    
+    #--------------------
+    #print (filtered_surveys_df.dtypes)
+    #print("\n----------------")
+
+    return filtered_surveys_df
 
 def get_ago_flayer(ago_flayer_id):
     """
@@ -334,7 +466,7 @@ def get_ago_flayer(ago_flayer_id):
 
     return ago_flayer_lyr, ago_flayer_fset, ago_features, ago_flayer_sdf
 
-def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
+def save_xlsx_to_os(s3_client, s3_bucket_name, df, file_name):
     """
     Saves an xlsx to Object Storage bucket.
     """
@@ -345,8 +477,8 @@ def save_xlsx_to_os(s3_client, bucket_name, df, file_name):
     #logging.info(f'..Trying to export {file_name} to XLS')
 
     try:
-        s3_client.put_object(Bucket=bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
-        logging.info(f'..data successfully saved {file_name} to bucket {bucket_name}')
+        s3_client.put_object(Bucket=s3_bucket_name, Key=file_name, Body=xlsx_buffer.getvalue())
+        logging.info(f'..data successfully saved {file_name} to bucket {s3_bucket_name}')
     except botocore.exceptions.ClientError as e:
         logging.error(f'..failed to save data to Object Storage: {e.response["Error"]["Message"]}')
 
@@ -354,6 +486,7 @@ def process_master_dataset(df):
     """
     Populates missing Latitude and Longitude values
     Format Datetime columns
+    Create a temporary MERGE_ID based on WLH_ID or CWD_EAR_CARD_ID.  One of these MUST be present.
     """
     logging.info("..cleaning-up data")
     df['LATITUDE_DD'] = pd.to_numeric(df['LATITUDE_DD'], errors='coerce')
@@ -364,7 +497,7 @@ def process_master_dataset(df):
             if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
                 return 'From Submitter'
             else:
-                return 'Incorrectly entered'
+                return 'Incorrectly Entered'
         return np.nan
 
     df['SPATIAL_CAPTURE_DESCRIPTOR'] = df.apply(set_source_value, axis=1)
@@ -378,28 +511,33 @@ def process_master_dataset(df):
     
     #correct errrors in MU column
     def correct_mu_value(mu):
+        if pd.isna(mu):
+            return mu  # Leave NaN values unchanged
         
+        mu = str(mu)  # Convert to string to avoid re.sub error
 
         # Remove any letters and spaces
         mu = re.sub(r'[a-zA-Z\s]', '', mu)
         
-        # Remove leading zeros
+        # Remove leading zeros from the part after the hyphen
         parts = mu.split('-')
         if len(parts) == 2 and parts[1].startswith('0'):
             parts[1] = parts[1][1:]
         return '-'.join(parts)
     
-    # Fill blank MU values with 'Not Recorded'
-    df['WMU'] = df['WMU'].fillna('Not recorded')
-    df['WMU'] = df['WMU'].replace('', 'Not recorded')
-
     # Apply correction to WMU column
     df['WMU'] = df['WMU'].apply(correct_mu_value)
-    
+
+    # Fill blank MU values with 'Not Recorded'
+    # TODO: Check if this is working?  results seem to be blank
+    df['WMU'] = df['WMU'].fillna('Not recorded')
+    df['WMU'] = df['WMU'].replace('', 'Not recorded')
     
     logging.info("..populating missing latlon from MU and Region centroids")
+    #Incorrectly Entered should be reviewed by the WH Team
     def latlong_from_MU(row, df_mu):
-        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['WMU'] != 'Not Recorded':
+        #if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly Entered') and (row['WMU'] != 'Not Recorded' or row['WMU'] != ''):
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR'])) and (row['WMU'] != 'Not Recorded' or row['WMU'] != ''):
             mu_value = row['WMU']
             match = df_mu[df_mu['MU'] == mu_value]
             if not match.empty:
@@ -410,10 +548,11 @@ def process_master_dataset(df):
     
     df = df.apply(lambda row: latlong_from_MU(row, df_mu), axis=1)
     
-    #populate lat/long Region centroid centroid
+    #populate lat/long Region centroid
     def latlong_from_Region(row, df_rg):
-        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly entered by user') and row['ENV_REGION_NAME'] != 'Not Recorded':
-            rg_value = row['ENV_REGION_NAME']
+        #if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR']) or row['SPATIAL_CAPTURE_DESCRIPTOR'] == 'Incorrectly Entered') and row['WMU_REGION_RESPONSIBLE'] != 'Not Recorded':
+        if (pd.isnull(row['SPATIAL_CAPTURE_DESCRIPTOR'])) and (row['WMU_REGION_RESPONSIBLE'] != 'Not Recorded' or row['WMU_REGION_RESPONSIBLE'] != ''):
+            rg_value = row['WMU_REGION_RESPONSIBLE']
             match = df_rg[df_rg['REGION'] == rg_value]
             if not match.empty:
                 row['LATITUDE_DD'] = match['CENTER_LAT'].values[0]
@@ -453,41 +592,50 @@ def process_master_dataset(df):
     df['GIS_LOAD_VERSION_DATE'] = current_datetime
 
     # Convert all columns containing 'DATE' in their names to datetime
-    date_columns = df.columns[df.columns.str.contains('DATE')]
-    df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
+    # TODO: Check date conversions?  
+    # Revised:  Use for AGO DATE(date and time) fields only.  DATEONLY fields can stay 
+    date_columns = df.columns[df.columns.str.contains('_DATE')]
+    #df[date_columns] = df[date_columns].apply(pd.to_datetime, errors='coerce')
 
 
     #ADD THIS IN AGAIN to make POwerBI work?? 2024-10-10
     #print(df.MORTALITY_DATE)
     ##convert the 'DATE' columns to only show the date part as short - don't include 00:00:00 time
     ## DO IN Web and Lab exports instead.  Need full dates for AGO and PowerBI(?)
-    ##  Warning:  This converts to a string vs a date type!
+    ##  Warning:  This converts to a string vs a date type!?
+    # TODO:  Check!  Most Date columns will not need the time.  Keep as string?
     for col in date_columns:
-        if 'DATE' in col and col != 'GIS_LOAD_VERSION_DATE':  #exclude GIS_LOAD_VERSION_DATE
-            df[col] = pd.to_datetime(df[col]).dt.date   #e.g.2024-09-08
+        if '_DATE' in col and col != 'GIS_LOAD_VERSION_DATE':  #exclude GIS_LOAD_VERSION_DATE
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date   #e.g.2024-09-08 string
+        if col == 'GIS_LOAD_VERSION_DATE':
+            #print('**Checking GIS_LOAD_VERSION_DATE**')
+            df[col] = df[col].apply(pd.to_datetime, errors='coerce')
     
     #print(df.MORTALITY_DATE)
 
-    #Sort
+    # Sort
     #df = df.sort_values(by=['SAMPLING_SESSION_ID','WLH_ID'])
     df = df.sort_values(by=['WLH_ID'])
+
+    # Create Temporary MERGE_ID.  One of WLH_ID or CWD_EAR_CARD_ID must be present.
+    df['MERGE_ID_TEMP'] = df['WLH_ID'].fillna(df['CWD_EAR_CARD_ID'])
 
     return df, current_datetime_str, timenow_rounded
 
 
-def hunter_qa_and_updates_to_master(df, hunter_df):
+def hunter_qa_and_updates_to_master(df, surveys_df):
     """
     Inputs:
         - df: Master Sampling dataset - all combined sampling records
-        - hunter_df: Hunter Survey data from AGO - all records
+        - surveys_df: Hunter Survey data from AGO - all records
 
     Outputs:  
-        1. All Hunter Survey (hs) records from AGO with QA flags for where there are discrepancies between the Hunter Survey data and the Master Sampling dataset.
+        1. All Hunter Survey (hs) merged records from AGO and CHEFS with QA flags for where there are discrepancies between the Hunter Survey data and the Master Sampling dataset.
            Flagged discrepancies are exported as an xls file (cwd_hunter_survey_flags_for_review_<datetime>.xlsx) to Object Storage for WH Team review, and QA flags are updated back to the Hunter data AGO.
            The WH Team will review the discrepancies and update the individual Sampling sheets as needed. They will
            update the two Review fields as appropriate, which will subsequently be added to the Hunter Survey data in AGO by this script.
         2. The Master Sampling dataset for which the lat/long and map source descriptor is corrected based on the hunter survey data, where there is a matching hs record.
-           This does not include Hunter Survey records where there is no matching Ear Tag ID and therefore there is no sampling data yet.
+           This does not include Survey records where there is no matching Ear Tag ID and therefore there is no sampling data yet.
 
         - hs_merged_df:   all hunter survey records with new qa columns and duplicates identified
         - flagged_hs_df:  flagged hunter survey records for qa review
@@ -497,51 +645,62 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
 
     # Length of initial dataframes
     #print(f"\n\t{len(df.index)}... Total Sampling Records in df")
-    #print(f"\t{len(hunter_df.index)}... Total Hunter Survey Records in hunter_df\n")
+    #print(f"\t{len(surveys_df.index)}... Total Hunter Survey Records in surveys_df\n")
 
+    #Columns from S123 to keep
+    # TODO: Add additional fields from CHEFS SURVEY - read from DataDictionary where field starts with SURVEY_
+    # or just use the surveys_df (that has already been filtered) and append the QA fields as needed
+    # TODO:  Add back in SURVEY_CWD_EAR_CARD_ID_TEXT 
     cols = [
-    "HUNTER_CWD_EAR_CARD_ID",
-    "HUNTER_CWD_EAR_CARD_ID_TEXT",
-    "HUNTER_SUBMIT_DATE_TIME",
-    "HUNTER_MORTALITY_DATE",
-    "HUNTER_SPECIES",
-    "HUNTER_SEX",
-    "HUNTER_LATITUDE_DD",
-    "HUNTER_LONGITUDE_DD",
-    "GEO_CHECK_PROV",
+    "SURVEY_CWD_EAR_CARD_ID",
+    "SURVEY_CWD_EAR_CARD_ID_TEXT",
+    "SURVEY_SUBMIT_DATE_TIME",
+    "SURVEY_MORTALITY_DATE",
+    "SURVEY_SPECIES",
+    "SURVEY_SEX",
+    "SURVEY_LATITUDE_DD_CALC",
+    "SURVEY_LONGITUDE_DD_CALC",
+    #"GEO_CHECK_PROV",
     "QA_HUNTER_SURVEY_FLAG",
     "QA_HUNTER_SURVEY_FLAG_DESC",
     "QA_HUNTER_EARCARD_DUPLICATE",
     "QA_HUNTER_SURVEY_REVIEW_STATUS"]
     #"QA_HUNTER_SURVEY_REVIEW_COMMENTS"  #no longer used - 2025-03-31
 
-    hunter_df = hunter_df[cols]
+    #surveys_df = surveys_df[cols]
 
-    logging.info("..calculating Hunter Survey QA field defaults")
-    # calc/reset default values for qa hunter columns. This will be re-calculated below.
-    #hunter_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC']] = None
-    hunter_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','QA_HUNTER_EARCARD_DUPLICATE']] = ''
-    hunter_df['QA_HUNTER_CHECK_DATE_TIME'] = current_datetime
+    logging.info("..calculating Survey QA field defaults")
+    # calc/reset default values for qa survey columns. This will be re-calculated below.
+    #surveys_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC']] = None
+    surveys_df[['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','QA_HUNTER_EARCARD_DUPLICATE']] = ''
+    surveys_df['QA_HUNTER_CHECK_DATE_TIME'] = current_datetime
 
     logging.info("..manipulating CWD_EAR_CARD_ID column")
-    # convert CWD Ear Card values from df to  integer to string
+    # convert CWD Ear Card values from df to integer to string
     df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: str(int(x)) if pd.notnull(x) and x != 'None' else None)
  
+    #print(df.dtypes['CWD_EAR_CARD_ID'])
+    #print(df['CWD_EAR_CARD_ID'].head(20))
+
+    #print(surveys_df.dtypes[['SURVEY_CWD_EAR_CARD_ID', 'SURVEY_CWD_EAR_CARD_ID_TEXT']])
+    #print(surveys_df[['SURVEY_CWD_EAR_CARD_ID', 'SURVEY_CWD_EAR_CARD_ID_TEXT']].head(20))
  
     # NOTE!  There may be duplicate Ear Card IDs in both the sampling data and the Hunter Survey data.  
     # May need to drop duplicates in df before joining to avoid addition of cross rows?
-    # This should be checked and resolved by the Wildlife Health Team.
+    # Duplicates should be checked and resolved by the Wildlife Health Team.
     logging.info("..joining matching sampling records to hunter survey data")
-    hs_merged_df = pd.merge(left=hunter_df,
+    hs_merged_df = pd.merge(left=surveys_df,
                          right=df, 
-                         left_on='HUNTER_CWD_EAR_CARD_ID_TEXT', 
+                         left_on='SURVEY_CWD_EAR_CARD_ID_TEXT',   # SURVEY_CWD_EAR_CARD_ID or SURVEY_CWD_EAR_CARD_ID_TEXT use TEXT version?
                          right_on='CWD_EAR_CARD_ID', 
                          how='left', 
                          indicator=True)
 
     #print(f"\n\t{len(hs_merged_df.index)}... total records in hs_merged_df\n")
-    
 
+    # Create Temporary MERGE_ID.  One of WLH_ID or CWD_EAR_CARD_ID must be present from the sampling data.
+    hs_merged_df['MERGE_ID_TEMP'] = hs_merged_df['WLH_ID'].fillna(hs_merged_df['CWD_EAR_CARD_ID'])
+    
     logging.info("..calculating Hunter Survey QA flags")
         
     # Flag records that DO NOT have an ear card id in the master sampling dataset, Otherwise, Matched
@@ -554,23 +713,23 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
                                                 'Matched', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
     
     # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the species do not match
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['HUNTER_SPECIES']) &
-                                               (hs_merged_df['SPECIES'].notna() & hs_merged_df['HUNTER_SPECIES'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['SURVEY_SPECIES']) &
+                                               (hs_merged_df['SPECIES'].notna() & hs_merged_df['SURVEY_SPECIES'].notna()), 
                                                'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
     
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['HUNTER_SPECIES']) &
-                                                        (hs_merged_df['SPECIES'].notna() & hs_merged_df['HUNTER_SPECIES'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SPECIES'] != hs_merged_df['SURVEY_SPECIES']) &
+                                                        (hs_merged_df['SPECIES'].notna() & hs_merged_df['SURVEY_SPECIES'].notna()), 
                                                         #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Species;',
                                                         'Species',
                                                         hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'])
 
     # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the sex does not match
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SEX'] != hs_merged_df['HUNTER_SEX']) &
-                                               (hs_merged_df['SEX'].notna() & hs_merged_df['HUNTER_SEX'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['SEX'] != hs_merged_df['SURVEY_SEX']) &
+                                               (hs_merged_df['SEX'].notna() & hs_merged_df['SURVEY_SEX'].notna()), 
                                                'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
     
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SEX'] != hs_merged_df['HUNTER_SEX']) &
-                                                     (hs_merged_df['SEX'].notna() & hs_merged_df['HUNTER_SEX'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['SEX'] != hs_merged_df['SURVEY_SEX']) &
+                                                     (hs_merged_df['SEX'].notna() & hs_merged_df['SURVEY_SEX'].notna()), 
                                                      #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Sex;',
                                                      hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('') + ', Sex',
                                                      #', Sex',
@@ -579,14 +738,14 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     # Update 'QA_HUNTER_SURVEY_FLAG' to 'Check' for records where the mortality dates do not match
     # Ensure date formats match - Converted to Pacific Time (above) and then to date part only
     hs_merged_df['MORTALITY_DATE'] = pd.to_datetime(hs_merged_df['MORTALITY_DATE'], errors='coerce').dt.date
-    hs_merged_df['HUNTER_MORTALITY_DATE'] = pd.to_datetime(hs_merged_df['HUNTER_MORTALITY_DATE'], errors='coerce').dt.date
+    hs_merged_df['SURVEY_MORTALITY_DATE'] = pd.to_datetime(hs_merged_df['SURVEY_MORTALITY_DATE'], errors='coerce').dt.date
     
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['HUNTER_MORTALITY_DATE']) &
-                                               (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['HUNTER_MORTALITY_DATE'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['SURVEY_MORTALITY_DATE']) &
+                                               (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['SURVEY_MORTALITY_DATE'].notna()), 
                                                'Check', hs_merged_df['QA_HUNTER_SURVEY_FLAG'])
     
-    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['HUNTER_MORTALITY_DATE']) &
-                                                     (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['HUNTER_MORTALITY_DATE'].notna()), 
+    hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'] = np.where((hs_merged_df['MORTALITY_DATE'] != hs_merged_df['SURVEY_MORTALITY_DATE']) &
+                                                     (hs_merged_df['MORTALITY_DATE'].notna() & hs_merged_df['SURVEY_MORTALITY_DATE'].notna()), 
                                                      #hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('Mismatched value(s):') + ' Mortality Date;',
                                                      hs_merged_df['QA_HUNTER_SURVEY_FLAG_DESC'].fillna('') + ', Mortality Date', 
                                                      #', Mortality Date',
@@ -604,11 +763,11 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     hs_merged_df = hs_merged_df.drop(columns='_merge')
 
     # Find duplicate Ear Card IDs and set QA_HUNTER_EARCARD_DUPLICATE to 'DUPLICATE'
-    hs_merged_df['QA_HUNTER_EARCARD_DUPLICATE'] = np.where(hs_merged_df.duplicated(subset='HUNTER_CWD_EAR_CARD_ID', keep=False), 'DUPLICATE', '')
+    hs_merged_df['QA_HUNTER_EARCARD_DUPLICATE'] = np.where(hs_merged_df.duplicated(subset='SURVEY_CWD_EAR_CARD_ID', keep=False), 'DUPLICATE', '')
     
 
     # Convert time aware datetime columns to string, otherwise cannot export to xls
-    for col in ['MORTALITY_DATE','HUNTER_MORTALITY_DATE','HUNTER_SUBMIT_DATE_TIME']: 
+    for col in ['MORTALITY_DATE','SURVEY_MORTALITY_DATE','SURVEY_SUBMIT_DATE_TIME']: 
         #hs_merged_df[col] = hs_merged_df[col].dt.tz_convert(None)  #remove timezone info (but it's still time aware)
         hs_merged_df[col] = hs_merged_df[col].astype(str)
         #hs_merged_df[col] = hs_merged_df[col].dt.tz_localize(None)
@@ -618,19 +777,22 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     #hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']] = hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS', 'QA_HUNTER_SURVEY_REVIEW_COMMENTS']].fillna('')
     hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS']] = hs_merged_df[['QA_HUNTER_SURVEY_REVIEW_STATUS']].fillna('')
 
+    print (hs_merged_df.dtypes)
+    print("\n----------------")
+
     #Export the Hunter Survey QA flags and associated sampling data to an XLS file for review by the WH Team
     export_cols = [
-        "HUNTER_CWD_EAR_CARD_ID",
-        "HUNTER_SUBMIT_DATE_TIME",
-        "HUNTER_MORTALITY_DATE",
+        "SURVEY_CWD_EAR_CARD_ID",
+        "SURVEY_SUBMIT_DATE_TIME",
+        "SURVEY_MORTALITY_DATE",
         "MORTALITY_DATE",
-        "HUNTER_SPECIES",
+        "SURVEY_SPECIES",
         "SPECIES",
-        "HUNTER_SEX",
+        "SURVEY_SEX",
         "SEX",
-        "HUNTER_LATITUDE_DD",
-        "HUNTER_LONGITUDE_DD",
-        "GEO_CHECK_PROV",
+        "SURVEY_LATITUDE_DD_CALC",
+        "SURVEY_LONGITUDE_DD_CALC",
+        #"GEO_CHECK_PROV",
         "QA_HUNTER_SURVEY_FLAG",
         "QA_HUNTER_SURVEY_FLAG_DESC",
         "QA_HUNTER_EARCARD_DUPLICATE",
@@ -646,9 +808,9 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
         "AGE_CLASS",
         "AGE_ESTIMATE",
         "DROPOFF_LOCATION",
-        "ENV_REGION_NAME",
+        "WMU_REGION_RESPONSIBLE",
         "WMU",
-        "SUBMITTER_TYPE",
+        "SUBMITTER_SOURCE",   #SUBMITTER_TYPE/SUBMITTER_SOURCE
         "SUBMITTER_FIRST_NAME",
         "SUBMITTER_LAST_NAME",
         "SUBMITTER_PHONE",
@@ -672,30 +834,38 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     
     #print(f"\n\t{len(flagged_hs_df.index)}... flagged hunter survey qa records found ... of a total of {len(hs_merged_df.index)} hs_merged_df records\n")
     
-    logging.info("..saving the Hunter Survey QA flags to xls")
-    save_xlsx_to_os(s3_client, 'whcwdd', flagged_hs_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_1_flags_for_review_{current_datetime_str}.xlsx')
+    
+    ### XLS export turned off as of Aug 15, 2025
+    #logging.info("..saving the Hunter Survey QA flags to xls")
+    #save_xlsx_to_os(s3_client, s3_bucket_name, flagged_hs_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_1_flags_for_review_{current_datetime_str}.xlsx')
     # TEMP
-    save_xlsx_to_os(s3_client, 'whcwdd', hs_merged_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_2_all_records_and_flags_{current_datetime_str}.xlsx')
+    #save_xlsx_to_os(s3_client, s3_bucket_name, hs_merged_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_2_all_records_and_flags_{current_datetime_str}.xlsx')
     
 
     #--------------------------------------------- end of the QA checks ----------------------------------------------
     #  Merge the Hunter Survey data with the Master Sampling data:
     
+    # TODO: Cofirm to use all columns from surveys_df
+    logging.info("..preparing Hunter Survey data for merging to master sampling dataset")
     cols = [
-    "HUNTER_MORTALITY_DATE",
-    "HUNTER_SPECIES",
-    "HUNTER_SEX",
-    "HUNTER_LATITUDE_DD",
-    "HUNTER_LONGITUDE_DD",
-    'HUNTER_CWD_EAR_CARD_ID_TEXT',
-    "HUNTER_CWD_EAR_CARD_ID",
-    "HUNTER_SUBMIT_DATE_TIME"
+    "SURVEY_MORTALITY_DATE",
+    "SURVEY_SPECIES",
+    "SURVEY_SEX",
+    "SURVEY_LATITUDE_DD_CALC",
+    "SURVEY_LONGITUDE_DD_CALC",
+    'SURVEY_CWD_EAR_CARD_ID_TEXT',
+    "SURVEY_CWD_EAR_CARD_ID",
+    "SURVEY_SUBMIT_DATE_TIME"
     ]   
 
-    hunter_df = hunter_df[cols]
-    hunter_df_no_dups = hunter_df.drop_duplicates(subset="HUNTER_CWD_EAR_CARD_ID_TEXT", keep="last")
+    #surveys_df = surveys_df[cols]  #Use all columns?
+    surveys_df['SURVEY_MORTALITY_DATE'] = pd.to_datetime(surveys_df['SURVEY_MORTALITY_DATE'], errors='coerce').dt.date
 
-    logging.info("\n..merging hunter survey results to sampling dataframe")
+    survey_df_no_dups = surveys_df.drop_duplicates(subset="SURVEY_CWD_EAR_CARD_ID_TEXT", keep="last")
+    #survey_df_no_dups = surveys_df.drop_duplicates(subset="SURVEY_CWD_EAR_CARD_ID", keep="last")
+
+
+    logging.info("\n..merging Survey results to sampling dataframe")
     # merge the dataframes
     # note that if there are duplicate Ear Card IDs in the hunter survey data, 
     # then there will be multiple records in the merged dataframe, if drop_duplicates is not used, above.
@@ -704,36 +874,36 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
 
     # Length of initial dataframes
     #print(f"\n\t{len(df.index)}...  Sampling Records in df")
-    #print(f"\t{len(hunter_df.index)}...  Hunter Survey Records in hunter_df")
-    #print(f"\t{len(hunter_df_no_dups.index)}...  Hunter Survey Records in hunter_df_no_dups\n")
+    #print(f"\t{len(surveys_df.index)}...  Hunter Survey Records in surveys_df")
+    #print(f"\t{len(survey_df_no_dups.index)}...  Hunter Survey Records in survey_df_no_dups\n")
 
     combined_df = pd.merge(left=df,
-                       right=hunter_df_no_dups,
+                       right=survey_df_no_dups,
                        how="left",
                        left_on="CWD_EAR_CARD_ID",
-                       right_on="HUNTER_CWD_EAR_CARD_ID_TEXT")
-                       #right_on="HUNTER_CWD_EAR_CARD_ID_TEXT").drop_duplicates(subset="HUNTER_CWD_EAR_CARD_ID_TEXT", keep="last")
+                       right_on="SURVEY_CWD_EAR_CARD_ID_TEXT")  #SURVEY_CWD_EAR_CARD_ID or SURVEY_CWD_EAR_CARD_ID_TEXT?
+                       #right_on="SURVEY_CWD_EAR_CARD_ID_TEXT").drop_duplicates(subset="SURVEY_CWD_EAR_CARD_ID_TEXT", keep="last")
     
     #print(f"\t{len(combined_df.index)}... records in combined_df")
     
     logging.info("..cleaning dataframes")
-    # filter df for where hunters have updated data.  i.e. sex cannot be null.
-    hunter_matches_df = combined_df[combined_df.HUNTER_SEX.notnull()].copy()
+    # filter df for where hunters have updated data.  i.e. sex (or other mandatory field) cannot be null.
+    hunter_matches_df = combined_df[combined_df.SURVEY_SEX.notnull()].copy()
     
     # filter df for where hunters have not updated data
-    xls_df = combined_df[combined_df.HUNTER_SEX.isnull()].copy()
+    xls_df = combined_df[combined_df.SURVEY_SEX.isnull()].copy()
 
     
-    # for hunter_matches_df - update MAP_SOURCE_DESCRIPTOR w/ value = Hunter Survey
-    xls_df['MAP_SOURCE_DESCRIPTOR'] =  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
-    hunter_matches_df['MAP_SOURCE_DESCRIPTOR'] = "Hunter Survey"
+    # for hunter_matches_df - update UPDATED_SPATIAL_CAPTURE_DESCRIPTOR w/ value = Hunter Survey
+    xls_df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] =  xls_df['SPATIAL_CAPTURE_DESCRIPTOR']
+    hunter_matches_df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = "Hunter Survey"
     
     # clean up xls_df to conform with ago field requirements 
-    xls_df[['HUNTER_SPECIES', 'HUNTER_SEX', 'HUNTER_MORTALITY_DATE']] = None
+    xls_df[['SURVEY_SPECIES', 'SURVEY_SEX', 'SURVEY_MORTALITY_DATE']] = None
 
-    # populate MAP_LATITUDE and MAP_LONGITUDE columns
-    hunter_matches_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = hunter_matches_df[['HUNTER_LATITUDE_DD', 'HUNTER_LONGITUDE_DD']]
-    xls_df[['MAP_LATITUDE', 'MAP_LONGITUDE']] = xls_df[['LATITUDE_DD', 'LONGITUDE_DD']]
+    # populate UPDATED_LATITUDE and UPDATED_LONGITUDE columns
+    hunter_matches_df[['UPDATED_LATITUDE', 'UPDATED_LONGITUDE']] = hunter_matches_df[['SURVEY_LATITUDE_DD_CALC', 'SURVEY_LONGITUDE_DD_CALC']]
+    xls_df[['UPDATED_LATITUDE', 'UPDATED_LONGITUDE']] = xls_df[['LATITUDE_DD', 'LONGITUDE_DD']]
 
     #print(f"\n\t{len(hunter_matches_df.index)}... records in hunter_matches_df")
     #print(f"\t{len(xls_df.index)}... records in xls_df")
@@ -742,12 +912,13 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     df_wh = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
     
     # Move columns to the last position
-    df_wh['MAP_SOURCE_DESCRIPTOR'] = df_wh.pop('MAP_SOURCE_DESCRIPTOR')
+    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = df_wh.pop('UPDATED_SPATIAL_CAPTURE_DESCRIPTOR')
     df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')
 
     # Convert all columns containing 'DATE' in their names to datetime
-    date_columns = df_wh.columns[df_wh.columns.str.contains('DATE')]
-    df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
+    # TURNED OFF - Sept.2025
+    #date_columns = df_wh.columns[df_wh.columns.str.contains('_DATE')]
+    #df_wh[date_columns] = df_wh[date_columns].apply(pd.to_datetime, errors='coerce')
 
     #ADD This back in?
     #strip time portion of date/time
@@ -756,19 +927,32 @@ def hunter_qa_and_updates_to_master(df, hunter_df):
     #for col in date_columns_convert:
     #    df_wh[col] = pd.to_datetime(df_wh[col]).dt.date   #e.g.2024-09-08  
 
-    #COLLECTION_DATE to string (for PowerBI?)
-    df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
+    # COLLECTION_DATE to string (for PowerBI?)
+    # TODO: Check if this conversion is needed
+    #df_wh['COLLECTION_DATE']= df_wh['COLLECTION_DATE'].astype(str)
 
-    #replace Not a Time (NaT) for entire dataframe
+    #replace Not a Time (NaT) and nan for entire dataframe
     df_wh = df_wh.replace(['NaT'], '')
+
+    fill_values = {}
+    for col in df_wh.columns:
+        #if pd.api.types.is_numeric_dtype(df_wh[col]):
+            #fill_values[col] = 0
+        #elif pd.api.types.is_datetime64_any_dtype(df_wh[col]):
+            #fill_values[col] = pd.Timestamp('1900-01-01')
+        if pd.api.types.is_object_dtype(df_wh[col]):
+            fill_values[col] = ''
+        #else:
+            #fill_values[col] = 'Unknown'  # Fallback for other types
+
+    # Apply the fill values
+    df_wh.fillna(value=fill_values, inplace=True)
+
 
     #Sort
     df_wh = df_wh.sort_values(by=['WLH_ID'])
 
-    #Add Time difference fields - calculate the number of days between key date fields where values are not null
-    df_wh['DAYS_DIFF_SAMPLED_SENT'] = (df_wh['SAMPLE_DATE_SENT_TO_LAB'] - df_wh['SAMPLED_DATE']).dt.days
-    df_wh['DAYS_DIFF_SENT_RESULTS'] = (df_wh['CWD_TEST_STATUS_DATE'] - df_wh['SAMPLE_DATE_SENT_TO_LAB']).dt.days
-
+    #Add logging for record counts
     logging.info(f"\n\t{len(df_wh.index)}... records in df_wh - master sampling dataset with hunter survey matches")
     logging.info(f"\t{len(hs_merged_df.index)}... records in hs_merged_df - hunter survey records")
     logging.info(f"\t{len(flagged_hs_df.index)}... records in flagged_hs_df - flagged hunter survey qa records \n")
@@ -779,7 +963,7 @@ def update_hs_review_tracking_list(flagged_hs_df):
 
     """
     Reads the existing master hunter survey QA tracking xls file into a dataFrame, reads new hs data from AGO, 
-    compares the records, and appends new records based on HUNTER_CWD_EAR_CARD_ID to the master tracking dataFrame.
+    compares the records, and appends new records based on SURVEY_CWD_EAR_CARD_ID to the master tracking dataFrame.
 
     This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
     This lets the team see what the original QA flags were, and what changes were made to the records.
@@ -797,7 +981,7 @@ def update_hs_review_tracking_list(flagged_hs_df):
     static_xls_path = 'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx'
     logging.info(f"...Checking for file: {static_xls_path}")
     try:
-        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+        obj = s3_client.get_object(Bucket=s3_bucket_name, Key=static_xls_path)
         data = obj['Body'].read()
         excel_file = pd.ExcelFile(BytesIO(data))
 
@@ -806,7 +990,7 @@ def update_hs_review_tracking_list(flagged_hs_df):
         static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
         # Compare records and append new flagged hunter survey records to the static DataFrame
-        new_records = flagged_hs_df[~flagged_hs_df['HUNTER_CWD_EAR_CARD_ID'].isin(static_df['HUNTER_CWD_EAR_CARD_ID'])]
+        new_records = flagged_hs_df[~flagged_hs_df['SURVEY_CWD_EAR_CARD_ID'].isin(static_df['SURVEY_CWD_EAR_CARD_ID'])]
         
         #if there are new records to add, then append them to the static DataFrame
         if len(new_records) == 0:
@@ -817,18 +1001,18 @@ def update_hs_review_tracking_list(flagged_hs_df):
             updated_tracking_df = pd.concat([static_df, new_records], ignore_index=True)
 
             # Fill nan values with empty strings
-            updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS']].fillna('')
+            updated_tracking_df[['QA_SURVEY_SURVEY_REVIEW_STATUS']] = updated_tracking_df[['QA_HUNTER_SURVEY_REVIEW_STATUS']].fillna('')
             #replace Not a Time (NaT) for entire dataframe
             updated_tracking_df = updated_tracking_df.replace(['NaT'], '')
 
             # Sort the DataFrame
-            updated_tracking_df = updated_tracking_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','HUNTER_CWD_EAR_CARD_ID'])
+            updated_tracking_df = updated_tracking_df.sort_values(by=['QA_HUNTER_SURVEY_FLAG','QA_HUNTER_SURVEY_FLAG_DESC','SURVEY_CWD_EAR_CARD_ID'])
 
             # Overwrite to xls
             logging.info("..saving the revised tracking list to xls")
             logging.info(f"\n{len(new_records)}... new flagged records found for Hunter Survey... added to {len(static_df)} existing records\n")
-            #save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/hunter_survey_mismatches/cwd_hunter_survey_qa_flag_status_tracking_master_{current_datetime_str}.xlsx')
-            save_xlsx_to_os(s3_client, 'whcwdd', updated_tracking_df, f'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx')
+            #save_xlsx_to_os(s3_client, s3_bucket_name, updated_tracking_df, f'qa/hunter_survey_mismatches/cwd_hunter_survey_qa_flag_status_tracking_master_{current_datetime_str}.xlsx')
+            save_xlsx_to_os(s3_client, s3_bucket_name, updated_tracking_df, f'qa/tracking/cwd_hunter_survey_qa_flag_status_tracking_master.xlsx')
 
     except Exception as e:
         logging.info(f"\n***WARNING...tracking file not currently found: {static_xls_path}\n...Skipping the update of the xls tracking list.\n")
@@ -869,8 +1053,8 @@ def update_hunter_flags_to_ago(df_hs, updated_tracking_df, spatial_fl_id):
     cols = [
     "SAMPLING_SESSION_ID",
     "WLH_ID",
-    "HUNTER_CWD_EAR_CARD_ID_TEXT",
-    "HUNTER_CWD_EAR_CARD_ID",
+    "SURVEY_CWD_EAR_CARD_ID_TEXT",
+    "SURVEY_CWD_EAR_CARD_ID",
     "QA_HUNTER_EARCARD_DUPLICATE",
     "QA_HUNTER_SURVEY_FLAG",
     "QA_HUNTER_SURVEY_FLAG_DESC",
@@ -898,8 +1082,8 @@ def update_hunter_flags_to_ago(df_hs, updated_tracking_df, spatial_fl_id):
     # Update the Feature Layer with the QA flags for matching records.  
     # This may overwrite existing values in the FL with the new qa values.  That is ok.
     uCount = 0   #initiate counter
-    fl_sum_fld = 'HUNTER_CWD_EAR_CARD_ID'
-    df_sum_fld = 'HUNTER_CWD_EAR_CARD_ID'
+    fl_sum_fld = 'SURVEY_CWD_EAR_CARD_ID'
+    df_sum_fld = 'SURVEY_CWD_EAR_CARD_ID'
     for ROW_ID in updated_df[fl_sum_fld]:
         try:
             upd_feature = [f for f in hs_features if f.attributes[fl_sum_fld] == ROW_ID][0]  #get the spatial feature
@@ -974,7 +1158,7 @@ def find_and_save_duplicates(df, fld, output_path):
     """
     
     # Exclude null values
-    df_non_null = df[df[fld].notna()]
+    df_non_null = df[df[fld].notna() & (df[fld] != '')]
 
     # Find duplicate values
     duplicate_mask = df_non_null.duplicated(subset= fld, keep=False)
@@ -985,7 +1169,7 @@ def find_and_save_duplicates(df, fld, output_path):
 
     # Save the duplicate values to an Excel report
     if not duplicate_df.empty:
-        save_xlsx_to_os(s3_client, 'whcwdd', duplicate_df, output_path)
+        save_xlsx_to_os(s3_client, s3_bucket_name, duplicate_df, output_path)
         #print(f"Duplicate values saved to {output_path}")
     else:
         logging.info(f"No duplicate values found for {fld}")
@@ -994,30 +1178,32 @@ def find_and_save_duplicates(df, fld, output_path):
 
 
 
-def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipality_sdf, buffer_distance, longcol, latcol):
+def check_point_within_poly(df_wh, mu_flayer_sdf, municipality_sdf, buffer_distance, longcol, latcol):
     """
-    Flags points where the sampling MU or Region does not match the spatial MU or Region.
+    Flags points where the sampling MU or Region does not match the spatial MU or MU Responsible Region.
     Note that there may be cases where the point is very close to a Region or MU border.
     
     This is only for records where the UPDATED_SPATIAL_CAPTURE_DESCRIPTOR is Hunter Survey or From Submitter i.e. not for centroid based locations where there is no lat/long available.
 
-    Add new fields to the master xls and FL for QA checks - QA_REG_WMU_CHECK, (QA_REG_WMU_CHECK_DATE_TIME)
+    Add new fields to the master xls and FL for QA checks - QA_REG_WMU_CHECK, (QA_REG_WMU_CHECK_DATE_TIME), QA_MUNI_CHECK
 
-    Add fields for updated/calculated Region and WMU.
+    Add fields for updated/calculated Region, WMU, and Muni.  Calc based on spatial overlay with submitter/survey x/y locations, if known.
+    Otherwise populate from sampling sheet, if available for other centroid based locations.
     """
     # convert MU, Region, and Municipality feature layers to geodataframes
-    mu_gdf = gpd.GeoDataFrame(mu_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['WILDLIFE_MGMT_UNIT_ID', 'SHAPE']]
-    rg_gdf = gpd.GeoDataFrame(rg_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['REGION_NAME', 'SHAPE']]
+    mu_gdf = gpd.GeoDataFrame(mu_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['WILDLIFE_MGMT_UNIT_ID','REGION_RESPONSIBLE_ID','REGION_RESPONSIBLE_NAME','SHAPE']]
+    #rg_gdf = gpd.GeoDataFrame(rg_flayer_sdf, geometry='SHAPE', crs="EPSG:4326")[['REGION_NAME', 'SHAPE']]
     municipality_gdf = gpd.GeoDataFrame(municipality_sdf, geometry='SHAPE', crs="EPSG:3005")[['ADMIN_AREA_ABBREVIATION', 'SHAPE']]
     
     df_length = len(df_wh)
+    #Drop rows where updated lat or long is missing
     df = df_wh.dropna(subset=[latcol, longcol])
     # filter for specific records from Hunter Survey or Submitter - i.e. based on specific lat/longs, not centroids.
-    df_select = df[(df['MAP_SOURCE_DESCRIPTOR'] == 'Hunter Survey') | (df['MAP_SOURCE_DESCRIPTOR'] == 'From Submitter')]
+    df_select = df[(df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Hunter Survey') | (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'From Submitter')]
     
     logging.info(f"\t{len(df_select)}... records found for Hunter or Submitter locations... of a total of {df_length} sampling records")
     
-    # Calc / Recalc default values for QA Checks - overwrites previous values.
+    # Calc / Recalc default values for QA Checks - overwrites previous values, if any.
     df_select['QA_REG_WMU_CHECK'] = ''
     df_select['QA_REG_WMU_CHECK_DATE_TIME'] = current_datetime
     # Add empty tracking columns for WH Team.  These are not published to the AGO FL, currently.
@@ -1029,39 +1215,74 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
     # spatial join the mu and region dataframes to the geodataframe
     logging.info("..performing spatial join")
     sjoin_mu_gdf = gpd.sjoin(gdf, mu_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
-
     # drop the index column to prep for the next spatial join
-    sjoin_mu_gdf = sjoin_mu_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
+    #sjoin_mu_gdf = sjoin_mu_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
+    sjoin_gdf = sjoin_mu_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
 
-    sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
-
+    #sjoin_gdf = gpd.sjoin(sjoin_mu_gdf, rg_gdf, how='left', predicate='within', lsuffix='left', rsuffix='right')
     # drop the index column to prep for the next spatial join
-    sjoin_gdf = sjoin_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
+    #sjoin_gdf = sjoin_gdf.drop(['index_left', 'index_right'], axis=1, errors='ignore')
+
+    # If WMU REGION_RESPONSIBLE_NAME = 'Omineca' and REGION_NAME = 'Peace' then change to 'Peace'
+    # To overide lagging WMU REGION_RESPONSIBLE_NAME field where the Omineca/Peace was not split out.
+    #sjoin_gdf.loc[(sjoin_gdf['REGION_RESPONSIBLE_NAME'] == 'Omineca') & (sjoin_gdf['REGION_NAME'] == 'Peace'), 'REGION_RESPONSIBLE_NAME'] = 'Peace'
+    #sjoin_gdf.loc[sjoin_gdf['REGION_RESPONSIBLE_ID'] == '7B', 'REGION_RESPONSIBLE_NAME'] = 'Peace'
+    #print(sjoin_gdf.columns)
+
+    
+    #TEMP - Compare spatial (ENV REGION)REGION_NAME and (WMU)REGION_RESPONSIBLE_NAME and list discrepancies.  Ignore blank and na values.
+    '''# Replace NaN with empty strings for comparison
+    sjoin_gdf['REGION_NAME'] = sjoin_gdf['REGION_NAME'].fillna('')
+    sjoin_gdf['REGION_RESPONSIBLE_NAME'] = sjoin_gdf['REGION_RESPONSIBLE_NAME'].fillna('')
+
+    # Create the discrepancy column
+    sjoin_gdf['REGION_DISCREPANCY'] = np.where(
+        (sjoin_gdf['REGION_NAME'] != '') & 
+        (sjoin_gdf['REGION_RESPONSIBLE_NAME'] != '') & 
+        (sjoin_gdf['REGION_NAME'] != sjoin_gdf['REGION_RESPONSIBLE_NAME']),
+        'Mismatch',
+        'Match')
+
+    #sjoin_gdf['REGION_DISCREPANCY'] = np.where(sjoin_gdf['REGION_NAME'] != sjoin_gdf['REGION_RESPONSIBLE_NAME'], 'Mismatch', 'Match')
+    region_discrepancies = sjoin_gdf[sjoin_gdf['REGION_DISCREPANCY'] == 'Mismatch']
+    logging.info(f"\n{len(region_discrepancies)}... records found with REGION_NAME and WMU_REGION_RESPONSIBLE discrepancies\n")
+    print(region_discrepancies[['WLH_ID','WILDLIFE_MGMT_UNIT_ID','WMU_REGION_RESPONSIBLE','REGION_NAME','REGION_RESPONSIBLE_NAME']])
+    sys.exit()'''
 
     # compare columns and update flags
     logging.info("..updating flags")
 
-     # Where there are sampling blanks - populate sampling Region/MU w/ values from the spatial join?
-     # or just keep in the spatial columns.  WMU_SPATIAL, ENV_REGION_SPATIAL
+    # Where there are sampling blanks - populate sampling Region/MU w/ values from the spatial join?
+    # or just keep in the spatial columns.  WMU_SPATIAL, ENV_REGION_SPATIAL
     """ 
     sjoin_gdf['WMU'] = sjoin_gdf['WMU'].fillna(sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'])
-    sjoin_gdf['ENV_REGION_NAME'] = sjoin_gdf['ENV_REGION_NAME'].fillna(sjoin_gdf['REGION_NAME'])
+    sjoin_gdf['WMU_REGION_RESPONSIBLE'] = sjoin_gdf['WMU_REGION_RESPONSIBLE'].fillna(sjoin_gdf['REGION_RESPONSIBLE_NAME'])
     """
-
-    ##DOUBLE CHECK - are missing MUs from Ear Card filled in in the spatial column?
     
-    # Flag records where the Region does not match the spatial Region
-    sjoin_gdf['QA_REG_WMU_CHECK'] = np.where((sjoin_gdf['REGION_NAME'].notna()) & (sjoin_gdf['ENV_REGION_NAME'].notna()) &
-                                                    (sjoin_gdf['REGION_NAME'] != sjoin_gdf['ENV_REGION_NAME']),
+
+    ##TODO: DOUBLE CHECK - are missing MUs from Survey Ear Card filled in in the spatial column?
+    # TODO: Check that Survey Region is filled in, if Survey MU is available.
+    
+    # Flag records where the sampling Region does not match the spatial WMU Region Responsible
+    sjoin_gdf['QA_REG_WMU_CHECK'] = np.where((sjoin_gdf['REGION_RESPONSIBLE_NAME'].notna()) & (sjoin_gdf['WMU_REGION_RESPONSIBLE'].notna()) &
+                                                    (sjoin_gdf['REGION_RESPONSIBLE_NAME'] != sjoin_gdf['WMU_REGION_RESPONSIBLE']),
                                                     'REG',
                                                     sjoin_gdf['QA_REG_WMU_CHECK'])
     
-    # Flag records where the MU does not match the spatial MU
+    # Flag records where the sampling MU does not match the spatial MU
     sjoin_gdf['QA_REG_WMU_CHECK'] = np.where((sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'].notna()) & (sjoin_gdf['WMU'].notna()) & 
                                                     (sjoin_gdf['WILDLIFE_MGMT_UNIT_ID'] != sjoin_gdf['WMU']),
                                                     sjoin_gdf['QA_REG_WMU_CHECK'].fillna('') + ', WMU',
                                                     sjoin_gdf['QA_REG_WMU_CHECK'])
 
+    # Update QA_REG_WMU_CHECK if there are hanging commas
+    def update_error_desc(desc):
+        if pd.isna(desc):
+            return desc
+        return desc.lstrip(", ")
+    sjoin_gdf['QA_REG_WMU_CHECK'] = sjoin_gdf['QA_REG_WMU_CHECK'].apply(update_error_desc)
+
+    
     logging.info("..adding municipalities")
     logging.info(f"..buffering municipality boundaries by {buffer_distance} in EPSG:3005")
     municipality_gdf['geometry'] = municipality_gdf.geometry.buffer(buffer_distance)
@@ -1077,15 +1298,14 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
     sjoin_gdf.loc[sjoin_gdf['ADMIN_AREA_ABBREVIATION']=='NRRM', 'ADMIN_AREA_ABBREVIATION'] = 'Northern Rockies'
 
     # TODO: change NRRM to longer name 
-    # TODO: flag points w/ MUNICIPALITY_NAME that fall outside the muni buffer. Only if Cranbook, Invermere, Kimberley. Do we need a FLAG field? 
-    
-    # Update QA_REG_WMU_CHECK if there are hanging commas
-    def update_error_desc(desc):
-        if pd.isna(desc):
-            return desc
-        return desc.lstrip(", ")
-    sjoin_gdf['QA_REG_WMU_CHECK'] = sjoin_gdf['QA_REG_WMU_CHECK'].apply(update_error_desc)
+    # TODO: CHECK logic. flag points w/ MUNICIPALITY_NAME from the sampling sheet, that fall outside the muni buffer (50m) (if x/y is not centroid based). 
+    # Only if Cranbook, Invermere, Kimberley.  For any mortality cause.
+    sjoin_gdf['QA_MUNI_CHECK'] = np.where((sjoin_gdf['MUNICIPALITY_NAME'].isin(['Cranbrook', 'Invermere', 'Kimberley'])) &
+                                            ((sjoin_gdf['ADMIN_AREA_ABBREVIATION'].isna()) | (sjoin_gdf['ADMIN_AREA_ABBREVIATION'] == '')),
+                                            'CHECK MUNI','')
 
+    muni_checks = sjoin_gdf[(sjoin_gdf['QA_MUNI_CHECK'] == 'CHECK MUNI')]
+    logging.info(f"\n{len(muni_checks)}... records found for QA_MUNI_CHECK\n")
     
     # drop joined columns
     # sjoin_df = sjoin_gdf.drop(['geometry', 'index_left', 'index_right', 'WILDLIFE_MGMT_UNIT_ID', 'REGION_NAME'], axis=1, errors='ignore')
@@ -1093,18 +1313,28 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
 
     """
     # append the rows with Unknown locations back to the dataframe
-    unknown_df = df[df['MAP_SOURCE_DESCRIPTOR'].isin(['Region Centroid', 'MU Centroid', 'Unknown'])]
+    unknown_df = df[df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'].isin(['Region Centroid', 'MU Centroid', 'Unknown'])]
     sjoin_df = pd.concat([sjoin_df, unknown_df], ignore_index=True)
     """
+    
+    print("Number of rows in sjoin_df:", len(sjoin_gdf))
+    #print("Column names in sjoin_df:", sjoin_gdf.columns.tolist())
+
+
+    # For the select coordinates (from survey or submitter), keep the Region, Mu, and Municipality (plus buffer)
+     # based on the spatial join.
+     # Otherwise, take the original values from the sampling sheet, where provided (see below).
 
     # Rename spatial columns
     sjoin_df = sjoin_df.rename(columns={
-        'WILDLIFE_MGMT_UNIT_ID': 'WMU_SPATIAL',
-        'REGION_NAME': 'ENV_REGION_SPATIAL',
+        'WILDLIFE_MGMT_UNIT_ID': 'UPDATED_WMU',   #'WMU_SPATIAL',
+        #'REGION_NAME': 'UPDATED_WMU_REG_RESPONSIBLE',  #'ENV_REGION_SPATIAL'  --USE REGION_RESPONSIBLE_NAME INSTEAD
+        'REGION_RESPONSIBLE_NAME': 'UPDATED_WMU_REG_RESPONSIBLE',  #from WMU join
         'ADMIN_AREA_ABBREVIATION': 'UPDATED_MUNICIPALITY'
     })
 
     #Get select columns
+    # TODO: Check if any columns are missing from the new CHEFS survey
     cols = [
         "SAMPLING_LEAD_FULL_NAME",
         "SAMPLING_CITY_LOCATION",
@@ -1117,21 +1347,22 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
         "LATITUDE_DD",
         "LONGITUDE_DD",
         "SPATIAL_CAPTURE_DESCRIPTOR",
-        "HUNTER_LATITUDE_DD",
-        "HUNTER_LONGITUDE_DD",
-        "MAP_LATITUDE",
-        "MAP_LONGITUDE",
-        "MAP_SOURCE_DESCRIPTOR",
-        "ENV_REGION_NAME",
-        "ENV_REGION_SPATIAL",
+        "SURVEY_LATITUDE_DD_CALC",
+        "SURVEY_LONGITUDE_DD_CALC",
+        "UPDATED_LATITUDE",
+        "UPDATED_LONGITUDE",
+        "UPDATED_SPATIAL_CAPTURE_DESCRIPTOR",
+        "WMU_REGION_RESPONSIBLE",
+        "UPDATED_WMU_REG_RESPONSIBLE",
         "WMU",
-        "WMU_SPATIAL",
+        "UPDATED_WMU",
         "MUNICIPALITY_NAME",
         "UPDATED_MUNICIPALITY",
         "QA_REG_WMU_CHECK",
         "QA_REG_WMU_CHECK_DATE_TIME",
         "QA_REG_WMU_CHECK_STATUS",
         "QA_REG_WMU_CHECK_COMMENTS",
+        "QA_MUNI_CHECK",
         "GIS_LOAD_VERSION_DATE",
         "COLLECTION_DATE",
         "IDENTIFIER_TYPE",
@@ -1142,7 +1373,7 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
         "AGE_ESTIMATE",
         "MORTALITY_CAUSE",
         "MORTALITY_DATE",
-        "SUBMITTER_TYPE",
+        "SUBMITTER_SOURCE",   #SUBMITTER_TYPE/SUBMITTER_SOURCE
         "SUBMITTER_FIRST_NAME",
         "SUBMITTER_LAST_NAME",
         "SUBMITTER_PHONE",
@@ -1152,48 +1383,61 @@ def check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, municipali
         "CWD_SAMPLED_IND",
         "CWD_TEST_STATUS",
         "CWD_TEST_STATUS_DATE",
-        "HUNTER_CWD_EAR_CARD_ID",
-        "HUNTER_MORTALITY_DATE",
-        "HUNTER_SPECIES",
-        "HUNTER_SEX",
-        "HUNTER_SUBMIT_DATE_TIME"
-        ]    
-  
+        "SURVEY_CWD_EAR_CARD_ID",
+        "SURVEY_MORTALITY_DATE",
+        "SURVEY_SPECIES",
+        "SURVEY_SEX",
+        "SURVEY_SUBMIT_DATE_TIME"
+        ]
+
     
     #Re-orders the columns, as listed above. Then sort.
-    mu_reg_flagged = sjoin_df[cols]
-    #mu_reg_flagged = mu_reg_flagged.sort_values(by=['QA_REG_FLAG','QA_WMU_FLAG'])
+    mu_reg_muni_df = sjoin_df[cols]
+    #mu_reg_muni_df = mu_reg_muni_df.sort_values(by=['QA_REG_FLAG','QA_WMU_FLAG'])
+
+    # Create Temporary MERGE_ID.  One of WLH_ID or CWD_EAR_CARD_ID must be present.
+    mu_reg_muni_df['MERGE_ID_TEMP'] = mu_reg_muni_df['WLH_ID'].fillna(mu_reg_muni_df['CWD_EAR_CARD_ID'])
 
     # How many flagged?
     #mu_reg_flagged = mu_reg_flagged[(mu_reg_flagged['QA_REG_FLAG'] == 'Check ENV REGION Survey') | (mu_reg_flagged['QA_WMU_FLAG'] == 'Check WMU')]
-    mu_reg_flagged = mu_reg_flagged[(mu_reg_flagged['QA_REG_WMU_CHECK'] != '')]
+    mu_reg_flagged = mu_reg_muni_df[(mu_reg_muni_df['QA_REG_WMU_CHECK'] != '')]
     logging.info(f"\t{len(mu_reg_flagged)}... records found for Flagged REGION or WMU mistmatches from Hunter or Submitter... of a total of {df_length} sampling records\n")
 
     
     # convert WMU column to string
     mu_reg_flagged['WMU'] = mu_reg_flagged['WMU'].astype(str)
-    mu_reg_flagged['WMU_SPATIAL'] = mu_reg_flagged['WMU_SPATIAL'].astype(str)
+    mu_reg_flagged['UPDATED_WMU'] = mu_reg_flagged['UPDATED_WMU'].astype(str)
 
     # sort
     mu_reg_flagged = mu_reg_flagged.sort_values(by=['WLH_ID'])
 
     # TEMP - Export list to XLS for backup.   This is the current list of flagged records vs the master tracking list, which may
     # include old records that have been reviewed and updated and comments added.
-    #save_xlsx_to_os(s3_client, 'whcwdd', mu_reg_flagged, f'qa/mu_reg_checks/bck/cwd_master_mu_region_checks_{current_datetime_str}.xlsx')
+    #save_xlsx_to_os(s3_client, s3_bucket_name, mu_reg_flagged, f'qa/mu_reg_checks/bck/cwd_master_mu_region_checks_{current_datetime_str}.xlsx')
     # TEMP - to create inital master tracking xls.
-    #save_xlsx_to_os(s3_client, 'whcwdd', mu_reg_flagged, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+    #save_xlsx_to_os(s3_client, s3_bucket_name, mu_reg_flagged, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
 
-    # Add QA_REG_WMU_CHECK to master sampling df
-    df_wh = df_wh.merge(mu_reg_flagged[['WLH_ID','QA_REG_WMU_CHECK', 'UPDATED_MUNICIPALITY']], on='WLH_ID', how='left')
+    # Add REG, WMU, MUNI and CHECK fields to master sampling df
+    # Updated: If WLH_ID is no longer mandatory, may need to merge on WLH_ID or CWD_EAR_CARD_ID, 
+    # so create a temp MERGE_ID that fills any blank WLH_ID with the CWD_EAR_CARD_ID ID, or concatenates them.
+    #df_wh = df_wh.merge(mu_reg_flagged[['WLH_ID','QA_REG_WMU_CHECK', 'UPDATED_WMU_REG_RESPONSIBLE','UPDATED_WMU','UPDATED_MUNICIPALITY']], on='WLH_ID', how='left')
+    df_wh = df_wh.merge(mu_reg_muni_df[['MERGE_ID_TEMP','QA_REG_WMU_CHECK', 'UPDATED_WMU_REG_RESPONSIBLE','UPDATED_WMU','UPDATED_MUNICIPALITY','QA_MUNI_CHECK']], on='MERGE_ID_TEMP', how='left')
     df_wh['GIS_LOAD_VERSION_DATE'] = df_wh.pop('GIS_LOAD_VERSION_DATE')   #Move to last column
-    
+
+    # Fill missing UPDATED_ values from sampling sheet for centroid based location, if sampling info available
+    df_wh['UPDATED_WMU_REG_RESPONSIBLE'] = df_wh['UPDATED_WMU_REG_RESPONSIBLE'].fillna(df_wh['WMU_REGION_RESPONSIBLE'])
+    df_wh['UPDATED_WMU'] = df_wh['UPDATED_WMU'].fillna(df_wh['WMU'])
+    # Calc UPDATED_MUNICIPALITY for remaining centroid based locations not populated above in spatial join
+    df_wh['UPDATED_MUNICIPALITY'] = df_wh['UPDATED_MUNICIPALITY'].fillna(df_wh['MUNICIPALITY_NAME'].where(df_wh['MUNICIPALITY_NAME'].notna() & (df_wh['MUNICIPALITY_NAME'].str.strip() != '')))
+
     return df_wh, mu_reg_flagged
 
 def update_sampling_mu_reg_review_tracking_list(flagged_df):
 
     """
-    Reads the existing master sampling tracking xls file into a dataFrame, reads flagged QA_REG_WMU_CHECK records , 
+    Reads the existing master sampling Tracking xls file into a dataFrame, reads flagged QA_REG_WMU_CHECK records , 
     compares the records, and appends new records based on WLH_ID to the master tracking dataFrame.
+    TODO:  Merge based on MERGE_ID_TEMP
 
     This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
     This lets the team see what the original QA flags were, and what changes were made to the records.
@@ -1209,7 +1453,7 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
     static_xls_path = 'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx'
     logging.info(f"...Checking for file:: {static_xls_path}")
     try:
-        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+        obj = s3_client.get_object(Bucket=s3_bucket_name, Key=static_xls_path)
         data = obj['Body'].read()
         excel_file = pd.ExcelFile(BytesIO(data))
 
@@ -1253,7 +1497,7 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
         # Overwrite to xls
         logging.info("..saving the revised tracking list to xls")
         #print(f"\n{len(new_records)}... new flagged records found for MU or REGION mismatches... added to {len(static_df)} existing records\n")
-        save_xlsx_to_os(s3_client, 'whcwdd', tracking_df, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
+        save_xlsx_to_os(s3_client, s3_bucket_name, tracking_df, f'qa/tracking/cwd_sampling_mu_region_checks_tracking_master.xlsx')
 
     except Exception as e:
         logging.info(f"\n***WARNING...tracking file not currently found: {static_xls_path}\n...Skipping the update of the xls tracking list.\n")
@@ -1262,10 +1506,15 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
 
 def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, summ_zones_features, summ_zones_sdf):
     """
-    Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MOE Region
+    Summarize a count of  'CWD_SAMPLED' by spatial unit - e.g. MU or MU Region Responsible.
     Add Counts: by fiscal year field, and overall total.
     Export to excel in object storage.
     Update values in existing AGO feature layer.
+
+    (df_sampled,'WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
+    
+
+    Region rollup count should be based on the WMU Region Responsible ID, NOT the ENV Region.
 
     """ 
 
@@ -1276,7 +1525,7 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
 
     # Filter columns to include
     df_unit_sampled = df_sampled[[df_sum_fld,'CWD_SAMPLED_IND', 'FISCAL_YEAR','GIS_LOAD_VERSION_DATE']]
-    #print(df_unit_sampled.dtypes
+    #print(df_unit_sampled.dtypes)
     #print(df_unit_sampled.head(20))
 
    #Group by the spatial unit field and count the total number of samples
@@ -1310,15 +1559,15 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
     ## Save the summary to a file in object storage (overwrites an existing file)
     summary_file_name = (df_sum_fld.lower()) +'_rollup_summary.xlsx'
     logging.info(f'\nSaving the Rollup summaries...')
-    bucket_name='whcwdd'
-    save_xlsx_to_os(s3_client, 'whcwdd', df_unit_count, 'master_dataset/spatial_rollup/'+summary_file_name)
+    #bucket_name=s3_bucket_name
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_unit_count, 'master_dataset/spatial_rollup/'+summary_file_name)
     
 
     # find rows in sampling summary that don't have a spatial unit match.  These are probably due to data entry errors.
     df_mismatch_errors = df_unit_count[~df_unit_count[df_sum_fld].isin(summ_zones_sdf[fl_sum_fld])]
     logging.info(f'\nCHECK DATA: The following unit(s) do not exist in the spatial data:  {df_mismatch_errors}')
     mismatch_file_name = 'no_spatial_match_'+ (df_sum_fld.lower()) +'.xlsx'
-    save_xlsx_to_os(s3_client, 'whcwdd', df_mismatch_errors, 'qa/mu_reg_checks/'+mismatch_file_name)
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_mismatch_errors, 'qa/mu_reg_checks/'+mismatch_file_name)
 
     # find overlapping rows
     logging.info(f"\nChecking for intersecting rows based on {df_sum_fld}/{fl_sum_fld}...this could take awhile...")
@@ -1331,7 +1580,8 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
     
     #Update cursor using the summary df directly (vs converting it to a hosted table in AGO)
     #First, set default Feature Layer rollup to 0 and the current date/time
-    ''' 
+    # Note that if fiscal year is beyond 2026-27, you'll have to add a new field in the feature layer for that fiscal year count!
+    
     uCount = 0
     logging.info("\nCalculating default values for Feature Layer...this could take awhile...")
     for feature in summ_zones_features:
@@ -1350,14 +1600,14 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
             logging.info(f'\nExiting...\n')
             sys.exit()
             #continue
-    '''
 
     
     # Get the list of existing fields in the layer
     existing_fields = [f['name'] for f in summ_zones_lyr.properties.fields]
 
     # Loop through your target columns and update only if target column exists
-    # Note that if fiscal year is beyond 2025-26, you'll have to add a field in the feature layer!
+    # Note that if fiscal year is beyond 2026-27, you'll have to add a new field in the feature layer for that fiscal year count!
+    '''#!!  calc_expression not working for some reason !! - use edit_features instead (above)
     logging.info("\nCalculating default values for Feature Layer...")
     for col in int_cols:
         if col in existing_fields:
@@ -1373,8 +1623,9 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
                 logging.info(f"Warning: {col} not found in layer fields!!")
     
     # Update the date field if it exists
-    #print(current_datetime)
+    print(current_datetime)
     if 'GIS_LOAD_VERSION_DATE' in existing_fields:
+        logging.info(f"Updating !")
         summ_zones_lyr.calculate(
             where="1=1",
             calc_expression={"field": "GIS_LOAD_VERSION_DATE", "value": current_datetime}
@@ -1382,14 +1633,14 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
     else:
         logging.info("Warning: GIS_LOAD_VERSION_DATE not found in layer fields!!")
     
-                          
+    '''                  
     logging.info(f"DONE Calculating default values for all records!")
-    
 
     logging.info(f'\nUpdating the AGO Feature Layer with the summary data...')
     #Then update the Feature Layer with the summary data for matching records
     uCount = 0   #reset counter
     for UNIT_ID in overlap_rows[fl_sum_fld]:
+        #logging.info(f"Updating {UNIT_ID}...")
         try:
             summ_feature = [f for f in summ_zones_features if f.attributes[fl_sum_fld] == UNIT_ID][0]  #get the spatial feature
             summary_row = df_unit_count.loc[df_unit_count[df_sum_fld] == UNIT_ID]#,['Sample_Count']] #get the dataframe summary row
@@ -1397,11 +1648,11 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
             for col in int_cols:
                 if col in existing_fields:
                     summary_val = summary_row[col].values[0]  #get the sample count value
-                    #print(summary_val)
+                    #logging.info(f"Summary value for {col} in {UNIT_ID}: {summary_val}")
                     summ_feature.attributes[col] = str(summary_val)
             #summ_feature.attributes['GIS_LOAD_VERSION_DATE'] = timenow_rounded #current_datetime_str
             summ_zones_lyr.edit_features(updates=[summ_feature])
-            #print(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}", flush=True)
+            #logging.info(f"Updated {summ_feature.attributes[fl_sum_fld]} sample count to {summary_val} at {timenow_rounded}")
             uCount = uCount + 1
         except Exception as e:
             logging.info(f"Could not update {UNIT_ID}. Exception: {e}")
@@ -1413,12 +1664,14 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
 def backup_master_dataset(s3_client, bucket_name):
     """
     Creates a backup of the Master dataset
+    
+    TODO: Revise this to ensure it is pointing to latest master with CHEFS survey results.
     """
     pacific_timezone = pytz.timezone('America/Vancouver')
     yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
     dytm = yesterday.strftime("%Y%m%d")
-    source_file_path = 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx'
-    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset_sampling_w_hunter.xlsx'
+    source_file_path = 'master_dataset/cwd_master_dataset_sampling_w_survey_results.xlsx'
+    destination_file_path = f'master_dataset/backups/{dytm}_cwd_master_dataset_sampling_w_survey_results.xlsx'
     
     try:
         s3_client.copy_object(
@@ -1430,9 +1683,11 @@ def backup_master_dataset(s3_client, bucket_name):
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
-def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str):
+def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime_str):
     """
-    Saves an xls containing information for the CWD webpage to publish test results.
+    Saves an xls containing information for the CWD webpage to publish test results,
+    and publish to existing AGO hosted table.  
+
     Exclude: Non-negative and Positive Statuses
 
     Aug-2025:   Keep DROPOFF_LOCATION and add CWD_NOT_SAMPLED_REASON
@@ -1442,13 +1697,13 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
     # delete existing XLS files in the share_Web folder
     try:
         # collect XLS file keys to delete
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
+        response = s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=folder)
         if 'Contents' in response:
             xls_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.xlsx')]
             #delete the files if there are any to remove
             if xls_keys:
                 logging.info(f".. Existing files to be deleted: {xls_keys}")
-                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': xls_keys})
+                s3_client.delete_objects(Bucket=s3_bucket_name, Delete={'Objects': xls_keys})
                 logging.info(f"..deleted existing files in folder: {folder}")
             else:
                 logging.info("..no existing files found in the folder.")
@@ -1458,16 +1713,25 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
         logging.error(f"..an error occurred while deleting existing files: {e}")
 
 
-    #filter rows to include in the webpage
+    #filter rows to include in the webpage  (Exclude Positive samples)
+    # Exclude CWD_EAR_CARD_ID if Not recorded (added Sept 2025)
     incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested','pending', 'negative', 'Unsuitable tissue', 'Not tested','unsuitable tissue', 'not tested']
     df_wb = df_wh[
         #(df_wh['CWD_SAMPLED_IND'] == 'Yes') & #Discussed with Shari to include all sampling results, even if not tested.
-        (df_wh['SAMPLED_DATE'] >= pd.Timestamp('2024-08-01')) & 
+        (pd.to_datetime(df_wh['SAMPLED_DATE'], errors='coerce') >= pd.Timestamp('2025-09-01')) &
+        (~df_wh['CWD_EAR_CARD_ID'].isin(['Not recorded', 'Not Recorded','']))  & # ~ Exclude
         (df_wh['CWD_TEST_STATUS'].isin(incld_sts))
     ]
 
-    #filter columns to include in the webpage
-    df_wb= df_wb[['CWD_EAR_CARD_ID',
+    logging.info(f"{len(df_wb.index)}... records found for Public Sampling Results")
+
+    # Filter columns to include in the webpage, based on the For_Results_Query column in the Data Dictionary
+    df_datadict_filtered = df_datadict[df_datadict['For_Results_Query'] == 'Yes']
+    keep_fields = df_datadict_filtered['GIS_FIELD_NAME'].tolist()
+    
+    df_wb = df_wb[keep_fields]
+
+    '''df_wb= df_wb[['CWD_EAR_CARD_ID',
                   'DROPOFF_LOCATION',
                   'SPECIES',
                   'SEX',
@@ -1476,24 +1740,23 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
                   'SAMPLED_DATE',
                   'CWD_TEST_STATUS',
                   'CWD_NOT_SAMPLED_REASON',
-                  'GIS_LOAD_VERSION_DATE']]  
-    
-    #print(df_wb.dtypes)
-    #print (df_wb)
+                  'GIS_LOAD_VERSION_DATE']]'''
 
-    #convert the 'DATE' columns to only show the date part as long  #e.g. September 1, 2024
-    for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
-        df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #(fyi - this converts the column to a string type vs date!)
+    # Convert the 'DATE' columns to only show the date part as long  #e.g. September 1, 2024
+    # No longer needed.
+    #for col in ['MORTALITY_DATE','SAMPLED_DATE']:  #df_wb.columns:  #do not use for GIS_LOAD_VERSION_DATE
+    #    df_wb[col] = pd.to_datetime(df_wb[col]).dt.strftime('%B %d, %Y')  #(fyi - this converts the column to a string type vs date!)
 
     #fill blank values with 'Not Recorded'
-    df_wb = df_wb.fillna('Not recorded')
-    df_wb = df_wb.replace('', 'Not recorded')
+    #df_wb = df_wb.fillna('Not recorded')
+    #df_wb = df_wb.replace('', 'Not recorded')
 
     #Sort by CWD_EAR_CARD_ID
     df_wb = df_wb.sort_values(by=['CWD_EAR_CARD_ID'])
 
-    #rename the columns
-    df_wb = df_wb.rename(columns={
+    # Rename the columns
+    # No longer needed, if data is going to AGO instead of to web table.  May use if going to PowerBI
+    '''df_wb = df_wb.rename(columns={
         'CWD_EAR_CARD_ID': 'CWD Ear Card',
         'DROPOFF_LOCATION': 'Drop-off Location',
         'SPECIES': 'Species',
@@ -1504,7 +1767,7 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
         'CWD_TEST_STATUS': 'CWD Status',
         'CWD_NOT_SAMPLED_REASON': 'Reason for Not Sampling',
         'GIS_LOAD_VERSION_DATE': 'GIS Load Version Date'
-    })
+    })'''
 
     
     #File is named with the GIS_LOAD_VERSION_DATE (aka current_datetime string)
@@ -1512,14 +1775,51 @@ def save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_st
 
     #convert to xls
     try:
-        save_xlsx_to_os(s3_client, bucket_name, df_wb, file_key)
-        logging.info(f'..public xlsx successfully saved to bucket {bucket_name}')
+        save_xlsx_to_os(s3_client, s3_bucket_name, df_wb, file_key)
+        logging.info(f'..public xlsx successfully saved to bucket {s3_bucket_name}')
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
 
+    # Also save/overwrite a copy to a static file name for PowerBI access
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_wb, 'master_dataset/cwd_sampling_results_for_public.xlsx')
+
+    # -----------------------------------------------
+    # Load records to AGO - CWD_Public_Sampling_Results  hosted table (non-spatial)
+    web_table_item_id = '358b088b619c4283958ed4506f91f069'
+    web_item = gis.content.get(web_table_item_id)
+    print(f"\nEXISTING SERVICE:  Title: {web_item.title}, ID: {web_item.id}, Type: {web_item.type}")
+
+    feature_table = web_item.tables[0]
+    ago_field_names = [field['name'] for field in feature_table.properties.fields]
+    #logging.info(f"\tExisting fields in hosted {web_item.type}: {ago_field_names}")
+
+    field_definitions = {key: fprop_dict[key] for key in keep_fields if key in fprop_dict}
+
+    # Add the data dictionary field schema to the feature service, if fields do not already exist
+    # This is used in the INITIAL hosted table creation, after the hosted table is created manually.
+    # Manual hosted table creation ensures that the OBJECT ID field is created and managed properly.
+    # In this case, the hosted table has already been created.
+    if 'CWD_TEST_STATUS' not in ago_field_names:
+        feature_table.manager.add_to_definition({"fields": field_definitions})
+        logging.info(f"Fields added successfully.")
+        
+        # Check updated fields
+        updated_fields = [field['name'] for field in feature_table.properties.fields]
+        print(updated_fields)
+
+        print("\n-----------------")
+    else:
+        logging.info(f"AGO Fields already exist.  Ready to load data :)\n")
+
+    # Truncate (delete) records and overwrite with new records
+    if df_wb.empty:
+        logging.info("..No Records found for Public Sampling Results to load to AGO!")
+    else:
+        truncate_and_load_to_ago(web_table_item_id, df_wb, field_definitions, 'table')
 
 
-def save_lab_submission (df_wh, s3_client, bucket_name, folder):
+
+def save_lab_submission (df_wh, s3_client, s3_bucket_name, folder):
     """
     Saves multiple xlss, each containing information for a specific lab submission.
     """
@@ -1527,13 +1827,13 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
     # delete existing XLS files in the to_Lab folder
     try:
         # collect XLS file keys to delete
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
+        response = s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=folder)
         if 'Contents' in response:
             xls_keys = [{'Key': obj['Key']} for obj in response['Contents'] if obj['Key'].endswith('.xlsx')]
             #delete the files if there are any to remove
             if xls_keys:
                 logging.info(f".. Existing files to be deleted: {xls_keys}")
-                s3_client.delete_objects(Bucket=bucket_name, Delete={'Objects': xls_keys})
+                s3_client.delete_objects(Bucket=s3_bucket_name, Delete={'Objects': xls_keys})
                 logging.info(f"..deleted existing files in folder: {folder}")
             else:
                 logging.info("..no existing files found in the folder.")
@@ -1593,7 +1893,7 @@ def save_lab_submission (df_wh, s3_client, bucket_name, folder):
 
             #Upload the XLSX to S3
             try:
-                save_xlsx_to_os(s3_client, bucket_name, group_df, file_key)
+                save_xlsx_to_os(s3_client, s3_bucket_name, group_df, file_key)
                 logging.info(f'..XLSX for submission {submission_id} successfully saved to {file_key}')
             except Exception as e:
                 logging.error(f"..an error occurred while saving {file_key}: {e}")
@@ -1619,8 +1919,8 @@ def save_tongue_sample_data(df_wh,df_tng_new):
     #print(df_tng_new[['Genomics ID','Date Samples Shipped']].tail(20))
 
 
-    if s3_file_exists_check(s3_client, bucket_name, static_xls_path):
-        obj = s3_client.get_object(Bucket='whcwdd', Key=static_xls_path)
+    if s3_file_exists_check(s3_client, s3_bucket_name, static_xls_path):
+        obj = s3_client.get_object(Bucket=s3_bucket_name, Key=static_xls_path)
         data = obj['Body'].read()
         excel_file = pd.ExcelFile(BytesIO(data))
 
@@ -1638,10 +1938,15 @@ def save_tongue_sample_data(df_wh,df_tng_new):
         # Get new merged tongue xls sheet and convert incoming tongue tracking column names to uppercase and replace spaces with underscores
         columns = df_tng_new.columns
         df_tng_new.columns = [col.upper().replace(' ', '_') for col in columns]
+
+        # Create Temporary MERGE_ID.  One of WLH_ID or CWD_EAR_CARD_ID must be present.
+        df_tng_new['MERGE_ID_TEMP'] = df_tng_new['WLH_ID'].fillna(df_tng_new['CWD_EAR_CARD_ID'])
+        
         logging.info(f"\n..{len(df_tng_new)}...records found in the submitted tongue tracking data")
         
         # Filter for records with SAMPLE_TONGUE_IND = 'Y' from the master dataframe
         df_tng_sampled = df_wh[df_wh['SAMPLE_TONGUE_IND'] == 'Yes']
+        df_tng_sampled['MERGE_ID_TEMP'] = df_tng_sampled['WLH_ID'].fillna(df_tng_sampled['CWD_EAR_CARD_ID'])
         logging.info(f"..{len(df_tng_sampled)}... records found with SAMPLE_TONGUE_IND = 'Yes' in the master dataset")
         
         # Tongue tracking column list
@@ -1650,11 +1955,15 @@ def save_tongue_sample_data(df_wh,df_tng_new):
         tng_column_list = ['GENOMICS_ID', 'MU_NUMBER','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
 
         # Join the tongue tracking fields to df_tng_sampled on WH_ID
-        df_tng_sampled = df_tng_sampled.merge(df_tng_new[tng_column_list + ['WLH_ID']], how='left', on='WLH_ID')
+        # TODO: Revise this to use the MERGE_ID_TEMP
+        # Confirm what the primary key column will be for tongue sampling sheet: 
+        #df_tng_sampled = df_tng_sampled.merge(df_tng_new[tng_column_list + ['WLH_ID']], how='left', on='WLH_ID')
+        df_tng_sampled = df_tng_sampled.merge(df_tng_new[tng_column_list + ['MERGE_ID_TEMP']], how='left', on='MERGE_ID_TEMP')
         logging.info(f"{len(df_tng_sampled)}... total merged tongue sample records")
 
         # Strip down/re-order final fields
-        fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','SAMPLING_SESSION_ID','WLH_ID','CWD_EAR_CARD_ID','DROPOFF_LOCATION','COLLECTION_DATE','SPECIES','SEX','AGE_CLASS','AGE_ESTIMATE','MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND','SAMPLE_EAR_TIP_IND','CWD_TEST_STATUS','ENV_REGION_NAME', 'WMU', 'MU_NUMBER','MAP_LATITUDE', 'MAP_LONGITUDE', 'MAP_SOURCE_DESCRIPTOR', 'GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
+        # TODO: Confirm if we want to use the UPDATED WMU /REGION instead or in addition?
+        fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','SAMPLING_SESSION_ID','WLH_ID','CWD_EAR_CARD_ID','DROPOFF_LOCATION','COLLECTION_DATE','SPECIES','SEX','AGE_CLASS','AGE_ESTIMATE','MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND','SAMPLE_EAR_TIP_IND','CWD_TEST_STATUS','WMU_REGION_RESPONSIBLE', 'WMU', 'MU_NUMBER','UPDATED_LATITUDE', 'UPDATED_LONGITUDE', 'UPDATED_SPATIAL_CAPTURE_DESCRIPTOR', 'UPDATED_WMU_REG_RESPONSIBLE','UPDATED_WMU','GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
         df_tng_sampled = df_tng_sampled[fldList]
 
         # Sort the dataframe
@@ -1686,8 +1995,8 @@ def save_tongue_sample_data(df_wh,df_tng_new):
 
         # Export to XLS
         logging.info(f"..saving the Tongue Tracking File to xls")
-        #save_xlsx_to_os(s3_client, 'whcwdd', df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_sample_tracking_{current_datetime_str}.xlsx')
-        save_xlsx_to_os(s3_client, 'whcwdd', df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_samples_merged.xlsx')
+        #save_xlsx_to_os(s3_client, s3_bucket_name, df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_sample_tracking_{current_datetime_str}.xlsx')
+        save_xlsx_to_os(s3_client, s3_bucket_name, df_tng_sampled, f'master_dataset/tongue_samples/cwd_tongue_samples_merged.xlsx')
 
     except Exception as e:
         logging.info(f"\n***WARNING...an error occurred in the tongue sampling function: {e}\n...Skipping the update of the tongue sampling xls tracking list.\n")
@@ -1717,9 +2026,10 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     # Define Pacific timezone
     pacific_timezone = pytz.timezone('America/Vancouver')
 
-    # Convert DATE fields to datetime, ensure they are timezone-aware
+    # Convert DATE (with date and time) fields to datetime, ensure they are timezone-aware
     for col in df.columns:
-        if 'DATE' in col:
+        #if 'DATE' in col:
+        if 'GIS_LOAD_VERSION_DATE' in col:
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(pacific_timezone, 
                                                                               ambiguous='NaT', 
                                                                               nonexistent='shift_forward')
@@ -1840,20 +2150,21 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
         raise RuntimeError(error_message)
 
 
-def retrieve_field_properties (s3_client, bucket_name):
+
+def retrieve_field_properties (s3_client, s3_bucket_name):
     """
     Constructs dictionaries containing field properties.
     """
     prefix= 'incoming_from_idir/data_dictionary/'
 
-    objects = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)['Contents']
+    objects = s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=prefix)['Contents']
 
     # Filter to only include the latest Data dictionnary file
     xlsx_files = [obj for obj in objects if obj['Key'].endswith('.xlsx')]
     latest_file = max(xlsx_files, key=lambda x: x['LastModified'])
 
     latest_file_key = latest_file['Key']
-    obj = s3_client.get_object(Bucket=bucket_name, Key=latest_file_key)
+    obj = s3_client.get_object(Bucket=s3_bucket_name, Key=latest_file_key)
     data = obj['Body'].read()
     excel_file = pd.ExcelFile(BytesIO(data))
 
@@ -1905,12 +2216,13 @@ def retrieve_field_properties (s3_client, bucket_name):
     }
     df_fprop['Type'] = df_fprop['Type'].map(type_mapping)
 
+    # T. Transpose the dataframe
     fprop_dict = df_fprop.set_index('GIS_FIELD_NAME').T.to_dict()
 
     #print(f"\nDomains Dictionary: {domains_dict}")
     #print(f"\nField Properties Dictionary: {fprop_dict}")
 
-    return domains_dict, fprop_dict
+    return df_datadict, domains_dict, fprop_dict
 
 
 def apply_field_properties(gis, title, domains_dict, fprop_dict):
@@ -1959,15 +2271,308 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     else:
         logging.info("..failed to update field properties. Response:", response)
 
+def truncate_and_load_to_ago(item_id, df,field_definitions, create_type):
+    """
+    For hosted TABLE
+    Truncate (delete) all existing records and replace them
+
+    item_id of the target table
+    df for the records to load
+    field_defintions dictionary (may be filtered for the particular ago service e.g. for sampling results)
+    create_type = 'table'  or 'feature_layer'.  Only 'table' is implemented currently.
+    """
+             
+    #Truncate Table
+    hosted_table_item = gis.content.get(item_id)
+    table_layer = hosted_table_item.tables[0]
+    hosted_table_manager = table_layer.manager
+
+    logging.info(f"\nTruncating and Loading new records to existing hosted table: {hosted_table_item.title}")
+
+    try:
+        hosted_table_manager.truncate()
+        logging.info(f"Data truncated")
+    except:
+        logging.warning("Truncate failed")
 
 
-def test_save_spatial_files(df, s3_client, bucket_name):
+
+    # -----------------------Load Table records (non-spatial)
+    # Preprocess the DataFrame for esriFieldTypeDateOnly fields
+    # NOTE:  MAY NEED TO FILL any null or Not Recorded dates as blanks or an obscure date, then fill with None later.
+    # It seems AGO accepts None for empty date fields, but the dataframe type can be Object, vs a date type.
+    
+    #print(field_definitions)
+    #dateonly_fields = [field['name'] for field in field_definitions if field['type'] == 'esriFieldTypeDateOnly']
+    dateonly_fields = [name for name, props in field_definitions.items() if props.get('Type') == 'esriFieldTypeDateOnly']
+
+    for field in dateonly_fields:
+        if field in df.columns:
+            #print(f"Processing 'esriFieldTypeDateOnly' field: {field} and values: {df[field].values}  ")
+            df[field] = pd.to_datetime(df[field], errors='coerce').dt.date  # Convert to date only - should be already done
+            df[field] = df[field].replace('Not Recorded', pd.Timestamp('1900-01-01'))
+            df[field] = df[field].where(df[field].notna(), pd.Timestamp('1900-01-01'))
+
+            # Replace default date with None
+            #df[field] = df[field].apply(lambda x: None if str(x) == '1900-01-01 00:00:00' else x)
+
+            #logging.info(f"Processed 'esriFieldTypeDateOnly' field: {field}")
+            #print(f"Fixed? 'esriFieldTypeDateOnly' field: {field} and values: {df[field].values}  ")
+    
+    for col in df.columns:
+        #if '_DATE' not in col:
+        df[col] = df[col].fillna('').astype(str)
+    
+    # Convert DATE field to datetime, ensure it is timezone-aware
+    for col in df.columns:
+        if 'GIS_LOAD_VERSION_DATE' in col:
+
+            print(f"Converting column '{col}' to datetime with timezone")
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(pacific_timezone, 
+                                                                            ambiguous='NaT', 
+                                                                            nonexistent='shift_forward')
+            df[col] = pd.to_datetime(df[col]).dt.tz_convert('UTC')
+    
+
+    #for col in df.columns:
+        #if '_DATE' not in col:
+    df[col] = df[col].fillna('')
+    
+    # Replace default date with None
+    for field in dateonly_fields:
+        if field in df.columns:
+            df[field] = df[field].apply(lambda x: None if str(x) == '1900-01-01 00:00:00' else x)
+
+    #Replace Not Recorded with None in Integer fields
+    #df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: None if str(x).strip() == 'Not Recorded' else x)
+    #df['CWD_EAR_CARD_ID'] = df['CWD_EAR_CARD_ID'].apply(lambda x: None if str(x).strip() == 'Not recorded' else x)
+
+    #print("\nDataFrame dtypes after manipulation loading:")
+    #print(df.dtypes)
+    #print(df[['CWD_EAR_CARD_ID','MORTALITY_DATE']].head(40))
+    #print(df[['CWD_EAR_CARD_ID','MORTALITY_DATE']].tail(40))
+
+    if create_type == "table":
+        # Load new Table from dataframe
+        logging.info(f"\nLoading new records to hosted table from dataframe...")
+        features = []
+        
+        #print(df.dtypes)
+        #print(df[['CWD_EAR_CARD_ID','MORTALITY_DATE','SAMPLED_DATE','GIS_LOAD_VERSION_DATE']].head(20))
+        #print(df[['CWD_EAR_CARD_ID','MORTALITY_DATE','SAMPLED_DATE','GIS_LOAD_VERSION_DATE']].tail(20))
+
+        # Get valid field names and types from the table schema
+        field_info = {field['name']: field['type'] for field in table_layer.properties.fields}
+        #print(f"\nFeature Layer Field Info:")
+        #for field in field_info:
+            #print(f"Field: {field}, Type: {field_info[field]}")
+
+        #logging.info(f"\nField names in hosted table: {[field['name'] for field in table_layer.properties.fields]}")
+
+        for _, row in df.iterrows():
+            attributes = {} 
+            for k, v in row.to_dict().items():
+                if k in field_info:
+                    field_type = field_info[k]
+                    # Validate and convert value based on field type
+                    if field_type == "esriFieldTypeInteger" or field_type == "esriFieldTypeSmallInteger":
+                        try:
+                            v = int(v) if pd.notnull(v) else None
+                        except Exception:
+                            logging.warning(f"Field '{k}' expects integer, got '{v}'")
+                            v = None
+                    '''
+                    elif field_type == "esriFieldTypeDouble" or field_type == "esriFieldTypeSingle":
+                        try:
+                            v = float(v) if pd.notnull(v) else None
+                        except Exception:
+                            logging.warning(f"Field '{k}' expects float, got '{v}'")
+                            v = None
+                    elif field_type == "esriFieldTypeDate":
+                        if pd.notnull(v):
+                            if not isinstance(v, (datetime, pd.Timestamp)):
+                                try:
+                                    v = pd.to_datetime(v)
+                                except Exception:
+                                    logging.warning(f"Field '{k}' expects date, got '{v}'")
+                                    v = None
+                    elif field_type == "esriFieldTypeDateOnly":
+                        # Ensure the value is a date (already handled by preprocess_dateonly_fields)
+                        #v = v if isinstance(v, datetime.date) else None
+                        v = v if isinstance(v, date) else None
+                        #v = v if isinstance(v, (date, pd.Timestamp)) else None
+                    elif field_type == "esriFieldTypeString":
+                        v = str(v) if pd.notnull(v) else None
+                    # Add other type checks as needed
+                    '''
+                    attributes[k] = v
+            features.append({"attributes": attributes})
+        #logging.info(f"\nFeatures to add: {features}")
+
+    #Or Load Feature Records (spatial) - NOT YET TESTED
+    if create_type == "feature_layer":
+        logging.info(f"\nLoading new records to hosted feature layer from dataframe...")
+        features = []
+        for _, row in df.iterrows():
+            attributes = row.to_dict()
+            geometry = {"x": row["Longitude"], "y": row["Latitude"]}  # Replace with your geometry fields
+            features.append({"attributes": attributes, "geometry": geometry})
+
+
+    # Add features to the table
+    logging.info(f"\nAdding {len(features)} records to the hosted table...\n")
+    #logging.info(f"\nFeatures to add (after preprocessing): {features}")
+
+    result = table_layer.edit_features(adds=features)
+
+    #result = table_layer.append(features) #?? Append does not work
+    print("\n-----------------")
+    #print(result)
+
+    if result['addResults'][0]['success']:
+        logging.info("Records added successfully.")
+    else:
+        # Extract the error message or reason for failure
+        error_message = result['addResults'][0].get('error', {}).get('message', 'Unknown error')
+        logging.warning(f"Failed to add records. Reason: {error_message}")
+
+    print("\n-----------------")
+    '''
+    # error handling and logging of editing result
+    try:
+        # check if all the features were added successfully
+        if all(res.get('success') for res in result.get('addResults', [])):
+            # log a success message with the number of features added
+            logging.info(f"..{len(features)} features added successfully.")
+        else:
+            # log an error if one or more features failed to add
+            logging.error("..some features failed to add.")
+            # log the full result object for debugging purposes
+            logging.error(f"..full result: {result}")
+    except Exception as e:
+        # catch any unexpected errors during the result handling process and log the full exception traceback for easier debugging
+        logging.exception(f"..unexpected error: {e}") 
+    '''
+
+
+    # Final Delete of xls, as it is no longer needed
+    #delete_existing_item(gis, item_title, item_type="Microsoft Excel")
+
+    logging.info(f"Done Truncate and Load")
+
+def master_dataframe_edits(df_wh, fprop_dict, domains_dict): 
+    """
+    Add remaining calculated fields and re-order all dataframe fields according to the Data Dictionary
+    """
+
+    # Categorize MORTALITY_CAUSE and SUBMITTER_SOURCE
+    # First remove any leading or trailing spaces from the strings
+    df_wh['MORTALITY_CAUSE'] = df_wh['MORTALITY_CAUSE'].str.strip()
+    df_wh['SUBMITTER_SOURCE'] = df_wh['SUBMITTER_SOURCE'].str.strip()
+
+    # Supply dictionaries 
+    # Future - instead of hard-coding these dictionaries, build it from the Data Dictionary picklist columns
+    mortality_cause_dict = {
+        'Euthanized - Clinical': 'Other',
+        'Euthanized - Not Clinical': 'Other',
+        'Harvest Kill': 'Harvest',
+        'Mortality Investigation': 'Other',
+        'Not Recorded': 'Not Recorded',
+        'Road Kill': 'Motor Vehicle Collision',
+        'Seized': 'Other',
+        'Targeted Removal - Contracted': 'Other',
+        'Targeted Removal - Special Permitted Hunt': 'Other',
+        'Targeted Removal - Urban Animal': 'Other',
+        'Train Kill': 'Motor Vehicle Collision'
+    }
+
+    submitter_source_dict = {
+        'Conservation Officer': 'Conservation Officer',
+        'Contractor': 'Other',
+        'First Nation': 'Other',
+        'Government Biologist': 'Government Biologist',
+        'Highway Crew': 'Highway Crew',
+        'Hunter': 'Hunter',
+        'Municipality': 'Municipality',
+        'Public': 'Other',
+        'RCMP': 'Other',
+        'Trapper': 'Trapper',
+        'WSRO': 'Other',
+        'Unknown': 'Unknown'
+    }
+
+    # Calculate the category based on the dictionary
+    df_wh['MORTALITY_CAUSE_CATEGORY'] = df_wh['MORTALITY_CAUSE'].map(mortality_cause_dict)
+    df_wh['SUBMITTER_SOURCE_CATEGORY'] = df_wh['SUBMITTER_SOURCE'].map(submitter_source_dict)
+
+
+    #print(df_wh.dtypes)
+    #print(df_wh[['CWD_TEST_STATUS_DATE','SAMPLE_DATE_SENT_TO_LAB']].dtypes)
+    #print(df_wh[['CWD_TEST_STATUS_DATE','SAMPLE_DATE_SENT_TO_LAB']])
+    #print(df_wh[['CWD_TEST_STATUS_DATE','SAMPLE_DATE_SENT_TO_LAB']].head(20))
+    
+    # Add Time difference fields - calculate the number of days between key date fields where values are not null
+    # TODO: Check - if CWD_TEST_STATUS is 'Negative', but missing dates, mark as complete?
+    logging.info("\n..Calculating Time Difference fields...")
+    #--
+    # Defaults
+    df_wh['LAB_TURNAROUND_DAYS'] = 0
+    df_wh['LAB_TURNAROUND_STATUS'] = 'N/A'
+
+    # Condition: Both dates are present → 'Complete'    
+    mask_complete = (
+        df_wh['CWD_TEST_STATUS_DATE'].notna() & (df_wh['CWD_TEST_STATUS_DATE'] != '') &
+        df_wh['SAMPLE_DATE_SENT_TO_LAB'].notna() & (df_wh['SAMPLE_DATE_SENT_TO_LAB'] != ''))
+    df_filtered1 = df_wh[mask_complete]
+    logging.info(f"\t{len(df_filtered1)}... Testing COMPLETE")
+
+    df_wh.loc[mask_complete, 'LAB_TURNAROUND_DAYS'] = (
+        pd.to_datetime(df_wh.loc[mask_complete, 'CWD_TEST_STATUS_DATE'], errors='coerce') -
+        pd.to_datetime(df_wh.loc[mask_complete, 'SAMPLE_DATE_SENT_TO_LAB'], errors='coerce')
+    ).dt.days
+
+    df_wh.loc[mask_complete, 'LAB_TURNAROUND_STATUS'] = 'Complete'
+
+    # Condition: Sample date present, test status date missing → 'In Progress'  (Some of these may be Not Tested - see below)
+    #mask_in_progress = df_wh['SAMPLE_DATE_SENT_TO_LAB'].notna() & df_wh['CWD_TEST_STATUS_DATE'].isna()
+    
+    mask_in_progress = (
+        (df_wh['CWD_TEST_STATUS_DATE'].isna() | (df_wh['CWD_TEST_STATUS_DATE'] == '')) &
+        df_wh['SAMPLE_DATE_SENT_TO_LAB'].notna() & (df_wh['SAMPLE_DATE_SENT_TO_LAB'] != '')
+    )
+    
+    df_filtered2 = df_wh[mask_in_progress]
+    logging.info(f"\t{len(df_filtered2)}... Testing IN PROGRESS")
+
+    df_wh.loc[mask_in_progress, 'LAB_TURNAROUND_DAYS'] = 0
+    df_wh.loc[mask_in_progress, 'LAB_TURNAROUND_STATUS'] = 'In Progress'
+
+    # Condition: CWD_TEST_STATUS = 'Not Tested' → 'Not Tested' - this may overwrite some of teh 'In Progress' records.
+    mask_not_tested = df_wh['CWD_TEST_STATUS'] == 'Not Tested'
+    df_filtered3 = df_wh[mask_not_tested]
+    logging.info(f"\t{len(df_filtered3)}... Not Tested")
+
+    df_wh.loc[mask_not_tested, 'LAB_TURNAROUND_DAYS'] = 0
+    df_wh.loc[mask_not_tested, 'LAB_TURNAROUND_STATUS'] = 'Not Tested'
+
+    # # Ensure all columns in fprop_dict are present in df_wh
+    # for field in fprop_dict.keys():
+    #     if field not in df_wh.columns:
+    #         df_wh[field] = None  # Add missing field with None values
+
+    # Reorder columns based on fprop_dict keys
+    ordered_columns = [field for field in fprop_dict.keys() if field in df_wh.columns]
+    df_wh = df_wh[ordered_columns]
+
+    return df_wh
+
+def test_save_spatial_files(df, s3_client, s3_bucket_name):
     """
     TEST Saves spatial files of the master datasets in object storage  e.g. KML, Shapefile.
     Not yet implemented in the main workflow.
     """
-    latcol='MAP_LATITUDE'
-    loncol= 'MAP_LONGITUDE'
+    latcol='UPDATED_LATITUDE'
+    loncol= 'UPDATED_LONGITUDE'
 
     df = df.dropna(subset=[latcol, loncol])
     df = df.astype(str)
@@ -1996,10 +2601,10 @@ def test_save_spatial_files(df, s3_client, bucket_name):
         s3_kml_key = f"spatial/{dytm}_cwd_sampling_points.kml"
         
         # Upload the KML file to S3
-        s3_client.put_object(Bucket=bucket_name, Key=s3_kml_key, Body=kml_buffer, 
+        s3_client.put_object(Bucket=s3_bucket_name, Key=s3_kml_key, Body=kml_buffer, 
                              ContentType='application/vnd.google-earth.kml+xml')
         
-        logging.info(f"..KML file saved to {bucket_name}/{s3_kml_key}")
+        logging.info(f"..KML file saved to {s3_bucket_name}/{s3_kml_key}")
         
     except Exception as e:
         logging.error(f"..failed to save or upload KML file: {e}")
@@ -2026,17 +2631,17 @@ def test_save_spatial_files(df, s3_client, bucket_name):
         s3_shapefile_key = f"spatial/{dytm}_cwd_sampling_points.zip"
 
         # Upload the Shapefile (zipped) to S3
-        s3_client.put_object(Bucket=bucket_name, Key=s3_shapefile_key, Body=shapefile_buffer, 
+        s3_client.put_object(Bucket=s3_bucket_name, Key=s3_shapefile_key, Body=shapefile_buffer, 
                              ContentType='application/zip')
 
-        logging.info(f"..shapefile saved to {bucket_name}/{s3_shapefile_key}")
+        logging.info(f"..shapefile saved to {s3_bucket_name}/{s3_shapefile_key}")
 
     except Exception as e:
         logging.error(f"..failed to save or upload the shapefile: {e}")       
 
 
 #---------------------------------------------------------------------------------------------------
-#  MAIN FUNCTION CALLS
+#  MAIN FUNCTION CALLS START
 #---------------------------------------------------------------------------------------------------
 
 
@@ -2045,13 +2650,19 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     
-    logging.info('Connecting to Object Storage')
-    S3_ENDPOINT = os.getenv('S3_ENDPOINT')
-    S3_CWD_ACCESS_KEY = os.getenv('S3_CWD_ACCESS_KEY')
-    S3_CWD_SECRET_KEY = os.getenv('S3_CWD_SECRET_KEY')
-    s3_client = connect_to_os(S3_ENDPOINT, S3_CWD_ACCESS_KEY, S3_CWD_SECRET_KEY)
-
     
+    # The GitHub repository contains the secrets file with the environment variables. 
+    # Or if running locally, set the sys environment variables in your IDE or terminal.
+
+    logging.info('Connecting to Object Storage')
+    # The secrets/passwords were updated from the Dev to the Prod environment on 29-Oct-2025.
+    S3_ENDPOINT = os.getenv('S3_ENDPOINT')
+    S3_CWD_ACCESS_KEY = os.getenv('S3_CWD_ACCESS_KEY')   #or S3_CWD_ACCESS_KEY_DEV for the Dev Environment, _TEST for Test Environment
+    S3_CWD_SECRET_KEY = os.getenv('S3_CWD_SECRET_KEY')   #or S3_CWD_SECRET_KEY_DEV for the Dev Environment, _TEST for Test Environment
+    s3_client = connect_to_os(S3_ENDPOINT, S3_CWD_ACCESS_KEY, S3_CWD_SECRET_KEY)
+    # Ensure that the s3_bucket_name variable below is set correctly for the environment (prod, dev, test).
+    s3_bucket_name = 'whcwdp' #'whcwdp' Production bucket, or 'whcwdd' Development bucket,  or 'whcwdt'  Test bucket
+
     logging.info('\nConnecting to AGO')
     AGO_HOST = os.getenv('AGO_HOST')
     AGO_USERNAME = os.getenv('AGO_USERNAME')
@@ -2066,125 +2677,155 @@ if __name__ == "__main__":
     timenow_rounded = datetime.now().astimezone(pacific_timezone)
     today = datetime.today().strftime('%Y%m%d')
 
+    # Get field properties from XLS Data Dictionary
+    df_datadict, domains_dict, fprop_dict = retrieve_field_properties(s3_client, s3_bucket_name)
 
     if s3_client:
         logging.info('\nRetrieving Incoming Sampling Data from Object Storage')
         #df = get_incoming_data_from_os(s3_client)
-        bucket_name = 'whcwdd'
+        #bucket_name = s3_bucket_name
         folder = 'incoming_from_idir/cwd_lab_submissions'
         required_headers = ['CWD_LAB_SUBMISSION_ID','WLH_ID','CWD_EAR_CARD_ID']  #provide either the required headers or the header index number
-        df = append_xls_files_from_os(s3_client, bucket_name, folder,'cwd_lab_submissions', 2, required_headers=None,sheet_name='Sampling Sheet')
+        df = append_xls_files_from_os(s3_client, s3_bucket_name, folder,'cwd_sample_collection', 2, required_headers=None,sheet_name='Sampling Sheet')
+        logging.info(f"Number of Sampling Records from Object Storage:  {len(df)}")
 
-        
         logging.info('\nRetrieving Centroid CSV Lookup Tables from Object Storage')
-        df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name='whcwdd')
+        df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name=s3_bucket_name)
 
-    
-    logging.info('\nGetting Hunter Survey Data from AGOL')
-    # Using Featire Layer ID is more reliable than the Name, which can be amiguous.
+   
+    logging.info('\nGetting Legacy Hunter Survey Data from AGOL')
+    # Using Feature Layer ID is more reliable than the Name, which can be ambiguous.
     #AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
     AGO_HUNTER_ITEM_ID = '107b4486f0674f0e8837f0745e49c194'  
     hunter_df = get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID)
 
     logging.info('\nGetting Hunter Survey Data from CHEFS')
     BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
-    FORM_ID = os.getenv("CHEFS_FORM_ID")
-    API_KEY = os.getenv("CHEFS_API_KEY")
+    FORM_ID =  os.getenv("CHEFS_FORM_ID")
+    API_KEY =  os.getenv("CHEFS_API_KEY")
     CHEFS_HIDDEN_FIELDS = ["LATITUDE_DD_CALC","LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
     chefs_df = get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
-    
-    logging.info('\nGetting MU, Region, and Municipality data from AGOL Feature Layers')
+    logging.info(f"Number of active records from CHEFS:  {len(chefs_df)}")
+
+    surveys_df = combine_survey_info(hunter_df, chefs_df, df)
+    logging.info(f"Total number of records from Hunter Survey and CHEFS:  {len(surveys_df)}")
+
+
+    #logging.info('\nGetting MU, Region, and Municipality data from AGOL Feature Layers')
+    logging.info('\nGetting MU and Municipality data from AGOL Feature Layers')
+    # This points to the project specific MU layer which has REGION_RESPONSIBLE_ID 7B updated to REGION_RESPONSIBLE_NAME = 'Peace'.
+    # Request to DataBC to update the WMU REGION_RESPONSIBLE_NAME was made Nov.4, 2025 to update the BCGW layer attributes. Stay tuned.
     mu_flayer_lyr, mu_flayer_fset, mu_features, mu_flayer_sdf = get_ago_flayer('0b81e46151184058a88c701853e09577')
+    #Use the WMU REGION_RESPONSIBLE field to validate the entered data in the master dataset (NOT the spatial overlap with BC Env Region)
     rg_flayer_lyr, rg_flayer_fset, rg_features, rg_flayer_sdf = get_ago_flayer('118379ce29f94faeaa724d2055ea235c')
-<<<<<<< Updated upstream
     muni_flayer_lyr, muni_flayer_fset, muni_features, muni_flayer_sdf = get_ago_flayer('e02cefad37f344008f0696663630e134')
-=======
-    # DELETE rg_fiscal_flayer_lyr, rg_fiscal_flayer_fset, rg_fiscal_features, rg_fiscal_flayer_sdf = get_ago_flayer('cdeaf3f9ffd448dfbf4079a8c99bef4f')
-    
->>>>>>> Stashed changes
+
 
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
 
-    logging.info('\nAdding hunter survey (hs) data to Master sampling dataset')
-    df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, hunter_df)
+    #TEMP
+    """for idf in df, chefs_df, hunter_df:
+        print("\n-------------------------")
+        print(len(idf))
+        print(idf.dtypes)
+        #print(idf.head(20))
+        #print(idf.tail(20))"""
+
+    logging.info('\nAdding Survey data to Master sampling dataset')
+    # UPDATED to incorporate CHEFS data.
+    df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, surveys_df)
+
+    #print("DONE TO HERE ")
+    #sys.exit()
 
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
+    # TODO: Turn back on once CHEFS data is incorporated and confirm if needed and revise as necessary.
     #updated_tracking_df = update_hs_review_tracking_list(flagged_hs_df)
 
-    '''
     logging.info('\nUpdating the AGO Hunter Survey Feature Layer with the latest QA flags')
-    update_hunter_flags_to_ago(hs_merged_df, updated_tracking_df, AGO_HUNTER_ITEM_ID)
+    # TODO: No longer needed, as AGO S123 is no longer being used. Determine if a new workflow is needed for CHEFS. Pubish new FL for combined survey data?
+    #update_hunter_flags_to_ago(hs_merged_df, updated_tracking_df, AGO_HUNTER_ITEM_ID)
 
     logging.info('\nFinding and saving duplicate CWD_EAR_CARD_IDs and WLH_IDs in Hunter data and Sampling data. ')
-    find_and_save_duplicates(hs_merged_df,'HUNTER_CWD_EAR_CARD_ID', f'qa/duplicate_ids/cwd_hunter_survey_ear_card_id_duplicates.xlsx')
+    find_and_save_duplicates(hs_merged_df,'SURVEY_CWD_EAR_CARD_ID', f'qa/duplicate_ids/cwd_survey_ear_card_id_duplicates.xlsx')
     find_and_save_duplicates(df_wh,'CWD_EAR_CARD_ID', f'qa/duplicate_ids/cwd_master_sampling_ear_card_id_duplicates.xlsx')
     find_and_save_duplicates(df_wh,'WLH_ID', f'qa/duplicate_ids/cwd_master_sampling_wh_id_duplicates.xlsx')
     
-    logging.info('\nChecking for mismatches between entered MU and Region and spatial location')
-    df_wh, mu_reg_flagged = check_point_within_mu_region(df_wh, mu_flayer_sdf, rg_flayer_sdf, muni_flayer_sdf, buffer_distance=50, longcol='MAP_LONGITUDE', latcol='MAP_LATITUDE')
+    logging.info('\nAdding REG, MU, MUNI spatial overlap. Checking for mismatches between entered MU, Region, and Municipality and spatial location')
+    df_wh, mu_reg_flagged = check_point_within_poly(df_wh, mu_flayer_sdf, muni_flayer_sdf, buffer_distance=50, longcol='UPDATED_LONGITUDE', latcol='UPDATED_LATITUDE')
 
     logging.info('\nAdding new MU REGION QA flags to master xls tracking list')
-    update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
-    
+    # TODO: Determine if a new workflow is needed for CHEFS.  
+    #update_sampling_mu_reg_review_tracking_list(mu_reg_flagged)
+
+    # Get field properties from Data Dictionary
+    # Add remaining calculated fields and re-order all fields according to the Data Dictionary
+    df_wh = master_dataframe_edits(df_wh, fprop_dict, domains_dict)
 
     logging.info('\nSaving the Master Dataset xlsx to Object Storage')
-    bucket_name='whcwdd'   # this points to GeoDrive
-    backup_master_dataset(s3_client, bucket_name) #backup
-    ##save_xlsx_to_os(s3_client, 'whcwdd', df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
-    save_xlsx_to_os(s3_client, 'whcwdd', df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + hunter data
-    '''
+    #bucket_name=s3_bucket_name   # this points to GeoDrive
+    backup_master_dataset(s3_client, s3_bucket_name) #backup  
+    ##save_xlsx_to_os(s3_client, s3_bucket_name, df, 'master_dataset/cwd_master_dataset_sampling.xlsx') #just lab data - used for initial testing
+    ##save_xlsx_to_os(s3_client, s3_bucket_name, df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + Old S123 hunter data
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_wh, 'master_dataset/cwd_master_dataset_sampling_w_survey_results.xlsx') #Newest Master
 
-    '''
+    
+    #'''
     logging.info('\nInitiating .... Saving an XLSX of sampling results for the webpage')
-    # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX
+    # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX Dev
     # #folder = 'Web/'       # this points to BCBOX
     # #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
-    bucket_name= 'whcwdd' # this points to GeoDrive
+    #bucket_name= s3_bucket_name # this points to GeoDrive
     folder= 'share_web/' # this points to GeoDrive
-    save_web_results (df_wh, s3_client, bucket_name, folder, current_datetime_str)
+    save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime_str)
     
 
     logging.info('\nInitiating .... Saving an XLSX for lab testing')
-    # bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX
+    # bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX Dev
     # folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
     # save_lab_submission (df_wh, s3_client, bucket_name_bbx, folder_bbx)
-    bucket_name= 'whcwdd' # this points to GeoDrive
+    #bucket_name= s3_bucket_name # this points to GeoDrive
     folder= 'share_labs/for_lab/' # this points to GeoDrive
-    save_lab_submission (df_wh, s3_client, bucket_name, folder)
+    save_lab_submission (df_wh, s3_client, s3_bucket_name, folder)
     
     logging.info('\nInitiating .... Saving an XLSX for tongue sample data')
-    bucket_name = 'whcwdd' 
     folder = 'incoming_from_idir/cwd_tongue_samples'
     required_headers = ['CWD_LAB_SUBMISSION_ID','WLH_ID','CWD_EAR_CARD_ID']  #provide either the required headers or the header index number
-    df_tng_new = append_xls_files_from_os(s3_client, bucket_name, folder,'genomebc_tongues', header_index_num=None, required_headers=required_headers, sheet_name=0)
+    df_tng_new = append_xls_files_from_os(s3_client, s3_bucket_name, folder,'genomebc_tongues', header_index_num=None, required_headers=required_headers, sheet_name=0)
     save_tongue_sample_data(df_wh,df_tng_new)
+
+    #print("DONE TO HERE ")
+    #sys.exit()
 
     # TESTING EXPORTING SPATIAL DATA
     #logging.info('\nSaving spatial data')
-    #test_save_spatial_files(df_wh, s3_client, bucket_name)
+    #test_save_spatial_files(df_wh, s3_client, s3_bucket_name)
     
-    
+    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
+    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
+    logging.info(f'CWD_SAMPLED_IND = Yes:  {len(df_sampled)}')
+    sampled_summary_by_unit(df_sampled,'UPDATED_WMU_REG_RESPONSIBLE', 'REGION_RESPONSIBLE_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
+    sampled_summary_by_unit(df_sampled,'UPDATED_WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
+
+
+    '''
+    #15-Sept-2025  Publishing to AGO is currently on hold while we revise the master template and field properties.
+    # TODO: Revise this to point to the new master template, with new CHEFS/Survey Fields and test loading.  Potentially use Truncate and Load function instead, with FL option.
     logging.info('\nPublishing the Master Dataset to AGO')
-    title='CWD_Master_dataset'
+    title='CWD_Master_dataset_Template'
+    master_item_id = '555d7896b8914ac993264adcd9d9a547'  
     folder='2024_CWD'
-    latcol='MAP_LATITUDE'
-    longcol= 'MAP_LONGITUDE'
+    latcol='UPDATED_LATITUDE'
+    longcol= 'UPDATED_LONGITUDE'
     published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
     
     logging.info('\nApplying field properties to the Feature Layer')
-    bucket_name= 'whcwdd'
-    domains_dict, fprop_dict= retrieve_field_properties(s3_client, bucket_name)
+    #bucket_name= s3_bucket_name
+    #domains_dict, fprop_dict= retrieve_field_properties(s3_client, s3_bucket_name)
     apply_field_properties (gis, title, domains_dict, fprop_dict)
     
     '''
-    logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
-    df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
-
-    logging.info(f'CWD_SAMPLED_IND = Yes:  {len(df_sampled)}')
-    #sampled_summary_by_unit(df_sampled,'ENV_REGION_NAME', 'REGION_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
-    sampled_summary_by_unit(df_sampled,'WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
-    
 
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
