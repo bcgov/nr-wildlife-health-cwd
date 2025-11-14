@@ -324,14 +324,28 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
 
 def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     logging.info("\nFetching the published version ID of the CHEFS form")
+    
+    logging.info(f"FORM_ID: {FORM_ID if FORM_ID else 'Missing'}")
+    logging.info(f"API_KEY: {'***' if API_KEY else 'Missing'}")
+
+
     version_data = chefs_api_request(base_url=BASE_URL, 
                                      endpoint="version", 
                                      form_id=FORM_ID, 
                                      api_key=API_KEY)
-    
-    # extract version ID from the response
+
+    #print("version_data:", version_data)
+    if version_data and 'versions' in version_data and version_data['versions']:
+        version_id = version_data['versions'][0]['id']
+        logging.info(f"..published version ID: {version_id}")
+    else:
+        logging.error("No versions found in CHEFS response.")
+        return pd.DataFrame()  # Return empty DataFrame if no versions found
+
+
+    '''# extract version ID from the response
     version_id = version_data['versions'][0]['id']
-    logging.info(f"..published version ID: {version_id}")
+    logging.info(f"..published version ID: {version_id}")'''
 
     logging.info("..fetching the published version ID of the CHEFS form")
     field_name_data = chefs_api_request(base_url=BASE_URL,
@@ -2680,6 +2694,7 @@ if __name__ == "__main__":
     # Get field properties from XLS Data Dictionary
     df_datadict, domains_dict, fprop_dict = retrieve_field_properties(s3_client, s3_bucket_name)
 
+
     if s3_client:
         logging.info('\nRetrieving Incoming Sampling Data from Object Storage')
         #df = get_incoming_data_from_os(s3_client)
@@ -2701,8 +2716,10 @@ if __name__ == "__main__":
 
     logging.info('\nGetting Hunter Survey Data from CHEFS')
     BASE_URL = "https://submit.digital.gov.bc.ca/app/api/v1/forms"
-    FORM_ID =  os.getenv("CHEFS_FORM_ID")
-    API_KEY =  os.getenv("CHEFS_API_KEY")
+    #FORM_ID =  os.getenv("CHEFS_FORM_ID")
+    #API_KEY =  os.getenv("CHEFS_API_KEY")
+    FORM_ID =  os.environ["CHEFS_FORM_ID"]
+    API_KEY =  os.environ["CHEFS_API_KEY"]
     CHEFS_HIDDEN_FIELDS = ["LATITUDE_DD_CALC","LONGITUDE_DD_CALC", "SAMPLE_FROM_SUBMITTER"]
     chefs_df = get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
     logging.info(f"Number of active records from CHEFS:  {len(chefs_df)}")
