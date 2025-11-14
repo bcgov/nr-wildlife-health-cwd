@@ -16,6 +16,8 @@ jobs:
       AGO_ACCOUNT_ID: ${{ secrets.AGO_ACCOUNT_ID}}
       AGO_USERNAME: ${{ secrets.AGO_USERNAME}}
       AGO_PASSWORD: ${{ secrets.AGO_PASSWORD}}
+      FORM_ID: ${{ secrets.CHEFS_FORM_ID}}
+      API_KEY: ${{ secrets.CHEFS_API_KEY}}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
