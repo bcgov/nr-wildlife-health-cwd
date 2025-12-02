@@ -323,6 +323,7 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     return hunter_df
 
 def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
+    # TODO:  Investigate if the CHEFS Reviewer Notes field can be pulled in from the API.
     logging.info("\nFetching the published version ID of the CHEFS form")
     
     logging.info(f"FORM_ID: {FORM_ID if FORM_ID else 'Missing'}")
@@ -384,7 +385,7 @@ def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     # print(chefs_df.head(20))
     # print(chefs_df.tail(20))
 
-    # Deal with Date/Time columns in CHEFS data and set as pacific time.  Mixed formats in the data.
+    # Deal with Date/Time columns in CHEFS data and set as pacific time.  Mixed formats in the source data from CHEFS.
     # Convert UTC Date Times  to Pacific Time.  Assumes inputs are Object types.
     # Store as strings in order to export to excel
 
@@ -1547,12 +1548,11 @@ def sampled_summary_by_unit(df_sampled, df_sum_fld, fl_sum_fld, summ_zones_lyr, 
     # Group by FISCAL_YEAR
     df_unit_fiscal_count = df_unit_sampled.groupby([ df_sum_fld,'FISCAL_YEAR' ])['CWD_SAMPLED_IND'].count().reset_index(name='Sample_Count')
     df_pivot = df_unit_fiscal_count.pivot(index=df_sum_fld, columns='FISCAL_YEAR', values='Sample_Count')
-    #Rename fiscal column headers with CWD_SAMPLE_COUNT_F prefix
+    #Rename fiscal column headers with CWD_SAMPLE_COUNT_F prefix.  If Fiscal Year is blank, leave as is.
     df_pivot.columns = [
-        f"CWD_SAMPLE_COUNT_F{str(col).replace('-', '_')}" if str(col)[0].isdigit() else col
-        for col in df_pivot.columns
-    ]
-    
+        f"CWD_SAMPLE_COUNT_F{str(col).replace('-', '_')}" if str(col) and str(col)[0].isdigit() else col
+        for col in df_pivot.columns]
+
     # Merge both DataFrames
     df_unit_count = df_unit_tot_count.merge(df_pivot, on=df_sum_fld, how='outer')  
    
@@ -1679,7 +1679,6 @@ def backup_master_dataset(s3_client, bucket_name):
     """
     Creates a backup of the Master dataset
     
-    TODO: Revise this to ensure it is pointing to latest master with CHEFS survey results.
     """
     pacific_timezone = pytz.timezone('America/Vancouver')
     yesterday = datetime.now(pacific_timezone) - timedelta(days=1)
@@ -1696,6 +1695,24 @@ def backup_master_dataset(s3_client, bucket_name):
         logging.info("..old master dataset backed-up successfully")
     except Exception as e:
         logging.info(f"..an error occurred: {e}")
+
+def save_public_db_file(df_wh, s3_client, s3_bucket_name):
+    """
+    Saves an xls containing columns for the public for PowerBI and/or AGO
+
+    # TODO:  Confirm if the records need to be filtered?  e.g. 'CWD_SAMPLED_IND' = 'Yes' or other criteria?
+    """
+
+    # Filter columns to include in the subset, based on the For_Public_Dashboarding column in the Data Dictionary
+    df_datadict_keep_for_public = df_datadict[df_datadict['For_Public_Dashboarding'] == 'Yes']
+    keep_public_fields = df_datadict_keep_for_public['GIS_FIELD_NAME'].tolist()
+    
+    df_wh_public = df_wh[[col for col in keep_public_fields if col in df_wh.columns]]
+
+    # Save/overwrite a copy to a static file name for PowerBI access
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_wh_public, 'share_public/cwd_master_public_fields_only.xlsx')
+
+    #return df_wh_public
 
 def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime_str):
     """
@@ -1742,6 +1759,7 @@ def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime
     # Filter columns to include in the webpage, based on the For_Results_Query column in the Data Dictionary
     df_datadict_filtered = df_datadict[df_datadict['For_Results_Query'] == 'Yes']
     keep_fields = df_datadict_filtered['GIS_FIELD_NAME'].tolist()
+    print("Columns to keep:", keep_fields)
     
     df_wb = df_wb[keep_fields]
 
@@ -1795,7 +1813,7 @@ def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime
         logging.info(f"..an error occurred: {e}")
 
     # Also save/overwrite a copy to a static file name for PowerBI access
-    save_xlsx_to_os(s3_client, s3_bucket_name, df_wb, 'master_dataset/cwd_sampling_results_for_public.xlsx')
+    save_xlsx_to_os(s3_client, s3_bucket_name, df_wb, 'share_public/cwd_sampling_results_for_public_web.xlsx')
 
     # -----------------------------------------------
     # Load records to AGO - CWD_Public_Sampling_Results  hosted table (non-spatial)
@@ -2033,7 +2051,11 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     df = df.astype(str)
 
     # Drop personal info fields from the dataset
-    drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID','STATUS_ID']
+    # TODO: Confirm if any other fields should be removed.  This could be controlled from the datadictionary 'Skip_for_AGO' field value (i.e. use a filter)
+     # Filter columns to include in the ago dataset, based on the Skip_for_AGO column in the Data Dictionary ( Skip_for_AGO = Yes  means exclude the field)
+    df_datadict_skip_for_ago = df_datadict[df_datadict['Skip_for_AGO'] == 'Yes']
+    drop_cols = df_datadict_skip_for_ago['GIS_FIELD_NAME'].tolist()
+    #drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID','STATUS_ID']
     df = df.drop(columns=[col for col in drop_cols if col in df.columns])
 
 
@@ -2707,7 +2729,8 @@ if __name__ == "__main__":
         logging.info('\nRetrieving Centroid CSV Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name=s3_bucket_name)
 
-   
+
+    
     logging.info('\nGetting Legacy Hunter Survey Data from AGOL')
     # Using Feature Layer ID is more reliable than the Name, which can be ambiguous.
     #AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
@@ -2724,6 +2747,7 @@ if __name__ == "__main__":
     chefs_df = get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
     logging.info(f"Number of active records from CHEFS:  {len(chefs_df)}")
 
+    
     surveys_df = combine_survey_info(hunter_df, chefs_df, df)
     logging.info(f"Total number of records from Hunter Survey and CHEFS:  {len(surveys_df)}")
 
@@ -2740,14 +2764,6 @@ if __name__ == "__main__":
 
     logging.info('\nProcessing the Master Sampling dataset')
     df, current_datetime_str, timenow_rounded = process_master_dataset (df)
-
-    #TEMP
-    """for idf in df, chefs_df, hunter_df:
-        print("\n-------------------------")
-        print(len(idf))
-        print(idf.dtypes)
-        #print(idf.head(20))
-        #print(idf.tail(20))"""
 
     logging.info('\nAdding Survey data to Master sampling dataset')
     # UPDATED to incorporate CHEFS data.
@@ -2788,6 +2804,10 @@ if __name__ == "__main__":
     save_xlsx_to_os(s3_client, s3_bucket_name, df_wh, 'master_dataset/cwd_master_dataset_sampling_w_survey_results.xlsx') #Newest Master
 
     
+    logging.info('\nInitiating .... Saving a subset of the dataset for public dashboarding')
+    folder= 'share_public/' # this points to GeoDrive
+    save_public_db_file (df_wh, s3_client, s3_bucket_name)
+
     #'''
     logging.info('\nInitiating .... Saving an XLSX of sampling results for the webpage')
     # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX Dev
@@ -2815,7 +2835,7 @@ if __name__ == "__main__":
     #print("DONE TO HERE ")
     #sys.exit()
 
-    # TESTING EXPORTING SPATIAL DATA
+    # TESTING EXPORTING SPATIAL DATA - not yet implemented in main workflow
     #logging.info('\nSaving spatial data')
     #test_save_spatial_files(df_wh, s3_client, s3_bucket_name)
     
