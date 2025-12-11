@@ -154,9 +154,10 @@ def convert_datetime(df, columns, strip_time=False, as_string=False, date_format
         if mask_offset.any():
             converted[mask_offset] = pd.to_datetime(df.loc[mask_offset, col], errors="coerce", utc=True)
 
-        # Convert to Pacific Time
+        # Convert to datetime 
+        # Don't convert to Pacific time as CHEFS assumes date/times are in UTC when the user completes the survey.
         converted = pd.to_datetime(converted, errors="coerce", utc=True)
-        converted = converted.dt.tz_convert(pacific_timezone).dt.tz_localize(None)
+        # converted = converted.dt.tz_convert(pacific_timezone).dt.tz_localize(None)
 
         # Format output
         if strip_time:
