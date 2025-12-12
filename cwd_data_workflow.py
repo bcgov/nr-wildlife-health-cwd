@@ -176,7 +176,8 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
     """
     Returns an appended df of specific xls files from Object Storage.
     Will check that fields match between files.
-    You must provide either the header_index_num or the required_headers.  This is to account for potentially different header row positions in the xls files.
+    You must provide either the header_index_num or the required_headers.  
+    This is to account for potentially different header row positions in the xls files.
     The incoming xls files must have required columns (e.g., WLH_ID, CWD_EAR_CARD_ID)  or a stable header_index_num.
     The incoming xls files must have a WLH_ID column.
 
@@ -225,7 +226,7 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
                     # Either WLH_ID or CWD_EAR_CARD_ID must be populated
                     df = df[df['WLH_ID'].notna() | df['CWD_EAR_CARD_ID'].notna()] #remove empty rows
 
-                    # Check that sampling sheet column names match the column names in the Data Dictionary (fprop_dict)
+                    # Check that sampling sheet column names are within the column names in the Data Dictionary (fprop_dict)
                     if file_text == 'cwd_sample_collection':
                         if not df.columns.isin(fprop_dict.keys()).all():
                             # Log the mismatched columns.
@@ -233,15 +234,38 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
                             logging.error(f"Mismatched columns in file {key}: {mismatched_cols.tolist()}\n")
                             # raise ValueError(f"Dataframe columns do not match field properties in file: {key}")
                     
-                    # Check that subsequent file columns match the columns in the first file
+
+                    # Check that subsequent file columns match the columns in the first file and if any columns are missing.
                     if df_list:
-                        existing_cols = df_list[0].columns  #get columns from first df
-                        if not df.columns.equals(existing_cols):    #order matters
-                        #if not df.columns.isin(existing_cols).all():    #order does not matter
-                            logging.error(f"Column names do not match between files. Mismatched file: {key}\n")
-                            #raise ValueError(f"Column names do not match between files. Mismatched file: {key}")
+                        reference_cols = df_list[0].columns  #get columns from first df
+                        current_cols = df.columns
+                        
+                        missing_cols = [col for col in reference_cols if col not in current_cols]
+                        extra_cols   = [col for col in current_cols   if col not in reference_cols]
+
+                        # Order check (optional): True if order differs but names are the same
+                        same_names_diff_order = (
+                            set(current_cols) == set(reference_cols)
+                            and not current_cols.equals(reference_cols)
+                        )
+
+                        # Log detailed schema issues
+                        if missing_cols or extra_cols or same_names_diff_order:
+                            parts = []
+                            if missing_cols:
+                                parts.append(f"Missing columns: {missing_cols}")
+                            if extra_cols:
+                                parts.append(f"Extra columns: {extra_cols}")
+                            if same_names_diff_order:
+                                parts.append("Column order differs from the first file")
+
+                            logging.error(
+                                "Schema mismatch relative to the first file. "
+                                f"Mismatched file: {key}\n" + "\n".join(parts)
+                            )
                         
                     df_list.append(df)
+
                 except botocore.exceptions.BotoCoreError as e:
                     logging.error(f"...failed to retrieve file: {e}")
     if df_list:
@@ -251,7 +275,33 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
     else:
         logging.info("..no dataframes to append")
         return pd.DataFrame()
-    
+
+
+def get_email_data_from_os(s3_client, bucket_name,filepathname):
+    """
+    Returns a DataFrame for the Email Submission file with verified lat/longs, from Object Storage.
+    Reads Default header (row 0) and default sheet (first sheet)
+    """
+    target_key = filepathname
+    # List objects in the bucket
+    response = s3_client.list_objects_v2(Bucket=bucket_name)
+
+    # Check if the target file exists
+    for obj in response.get('Contents', []):
+        if obj['Key'] == target_key:
+            logging.info("..reading email submissions .xlsx")
+
+            # Get the object and read into pandas
+            resp = s3_client.get_object(Bucket=bucket_name, Key=target_key)
+            data_bytes = resp['Body'].read()
+
+            # Use defaults: header=0, sheet_name=0
+            df = pd.read_excel(BytesIO(data_bytes), engine='openpyxl')
+
+            return df
+
+    # If file not found
+    raise FileNotFoundError(f"Object not found: s3://{bucket_name}/{target_key}")
 
 
 def get_lookup_tables_from_os(s3_client, bucket_name):
@@ -275,6 +325,7 @@ def get_lookup_tables_from_os(s3_client, bucket_name):
             df_mu = pd.read_csv(BytesIO(obj['Body'].read()))
             
     return df_rg, df_mu
+
 
 def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     """
@@ -376,7 +427,7 @@ def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     chefs_df['CWD_EAR_CARD_ID'] = pd.to_numeric(chefs_df['CWD_EAR_CARD_ID'], errors='coerce').astype('Int64')
 
     logging.info("..saving raw CHEFS data to object storage")
-    # TOGGLE
+    # TOGGLE as needed
     save_xlsx_to_os(s3_client, s3_bucket_name, chefs_df, f'chefs_survey/cwd_hunter_survey_data_from_chefs_backup_{current_datetime_str}.xlsx')
 
 
@@ -507,8 +558,10 @@ def process_master_dataset(df):
     df['LATITUDE_DD'] = pd.to_numeric(df['LATITUDE_DD'], errors='coerce')
     df['LONGITUDE_DD'] = pd.to_numeric(df['LONGITUDE_DD'], errors='coerce')
     
+    
     def set_source_value(row):
         if pd.notna(row['LATITUDE_DD']) and pd.notna(row['LONGITUDE_DD']):
+            # TODO: Check for  SPATIAL_CAPTURE_DESCRIPTOR is not null (i.e. can be 'Email Response') in sampling sheet, and keep that value.
             if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
                 return 'From Submitter'
             else:
@@ -644,6 +697,8 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
         - df: Master Sampling dataset - all combined sampling records
         - surveys_df: Hunter Survey data from AGO - all records
 
+        Incorporate Email Submission lat/longs into the UPDATED lat/long and UPDATED_SPATIAL_CAPTURE_DESCRIPTOR fields.
+
     Outputs:  
         1. All Hunter Survey (hs) merged records from AGO and CHEFS with QA flags for where there are discrepancies between the Hunter Survey data and the Master Sampling dataset.
            Flagged discrepancies are exported as an xls file (cwd_hunter_survey_flags_for_review_<datetime>.xlsx) to Object Storage for WH Team review, and QA flags are updated back to the Hunter data AGO.
@@ -655,6 +710,7 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
         - hs_merged_df:   all hunter survey records with new qa columns and duplicates identified
         - flagged_hs_df:  flagged hunter survey records for qa review
         - df_wh:          updated master sampling dataset with hunter (wh) survey matches
+    
     """
     #logging.info("..calculating Hunter Survey QA flags")
 
@@ -851,6 +907,7 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
     
     
     ### XLS export turned off as of Aug 15, 2025
+    # TODO: Determine if this should be re-activated.
     #logging.info("..saving the Hunter Survey QA flags to xls")
     #save_xlsx_to_os(s3_client, s3_bucket_name, flagged_hs_df, f'qa/hunter_survey_mismatches/bck/cwd_hunter_survey_1_flags_for_review_{current_datetime_str}.xlsx')
     # TEMP
@@ -860,7 +917,7 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
     #--------------------------------------------- end of the QA checks ----------------------------------------------
     #  Merge the Hunter Survey data with the Master Sampling data:
     
-    # TODO: Cofirm to use all columns from surveys_df
+    # TODO: Confirm to use all columns from surveys_df
     logging.info("..preparing Hunter Survey data for merging to master sampling dataset")
     cols = [
     "SURVEY_MORTALITY_DATE",
@@ -902,8 +959,8 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
     #print(f"\t{len(combined_df.index)}... records in combined_df")
     
     logging.info("..cleaning dataframes")
-    # filter df for where hunters have updated data.  i.e. sex (or other mandatory field) cannot be null.
-    hunter_matches_df = combined_df[combined_df.SURVEY_SEX.notnull()].copy()
+    # filter df for where hunters have updated data.  i.e. SURVEY_SOURCE (or other mandatory field) cannot be null.
+    hunter_matches_df = combined_df[combined_df.SURVEY_SOURCE.notnull()].copy()
     
     # filter df for where hunters have not updated data
     xls_df = combined_df[combined_df.SURVEY_SEX.isnull()].copy()
@@ -924,7 +981,27 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
     #print(f"\t{len(xls_df.index)}... records in xls_df")
 
     # re-combine dataframes
-    df_wh = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
+    df_wh_temp = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
+
+    # Use df_email_submissions Latitude and Longitude fields to update UPDATED_LATITUDE, UPDATED_LONGITUDE where there is a matching Ear Card ID
+    # Calculate  UPDATED_SPATIAL_CAPTURE_DESCRIPTOR to 'Email Submission'
+    logging.info("..adding email submission lat/long to master sampling dataset")
+    df_email_submissions['Ear Card'] = df_email_submissions['Ear Card'].astype(str)
+    df_wh = pd.merge(left=df_wh_temp,
+                    right=df_email_submissions[['Ear Card', 'Latitude', 'Longitude']],
+                    how='left',                
+                    left_on='CWD_EAR_CARD_ID',
+                    right_on='Ear Card')
+
+    # Replace any existing values entirely
+    df_wh['UPDATED_LATITUDE']  = df_wh['Latitude']
+    df_wh['UPDATED_LONGITUDE'] = df_wh['Longitude']
+    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = np.where(df_wh['Latitude'].notna() & df_wh['Longitude'].notna(),
+                                                          'Email Submission',                   
+                                                            df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'])
+
+    # Drop unneeded columns
+    df_wh = df_wh.drop(columns=['Ear Card', 'Latitude', 'Longitude'])
     
     # Move columns to the last position
     df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = df_wh.pop('UPDATED_SPATIAL_CAPTURE_DESCRIPTOR')
@@ -983,7 +1060,8 @@ def update_hs_review_tracking_list(flagged_hs_df):
     This tracking xls preserves the original flags and review status for each record, before any changes may be made in the individual sampling sheets by the WH Team.
     This lets the team see what the original QA flags were, and what changes were made to the records.
     
-    NOTE:  28-Feb-2025 - there is a glitch in S3 storage where the file is disappearing.  Trying to resolve this with the help desk.
+    NOTE:  28-Feb-2025 - there is a glitch in S3 storage where the file is disappearing. This seems to be related to when the file is open
+      in Excel and temp files are created. 
 
     Parameters:
     - flagged_hs_df: DataFrame containing the flagged hunter survey records.
@@ -1119,7 +1197,8 @@ def update_hunter_flags_to_ago(df_hs, updated_tracking_df, spatial_fl_id):
             continue
     logging.info(f'DONE updating the Hunter Survey AGO Feature Layer with the new QA Flags for:  {uCount} records.')
 
-    #if updated_tracking_df is not empty (i.e. xls file is available and has records), then update the AGO FL with the review status and comments  
+    # if updated_tracking_df is not empty (i.e. xls file is available and has records), then update the AGO FL with the review status and comments 
+    # No longer updating comments to AGO - 2025-03-31 - as comments may contain personal names. 
     if not updated_tracking_df.empty:
         logging.info('Updating the AGO Hunter Survey Feature Layer with the latest QA tracking review status and comments ...')
 
@@ -1214,6 +1293,7 @@ def check_point_within_poly(df_wh, mu_flayer_sdf, municipality_sdf, buffer_dista
     #Drop rows where updated lat or long is missing
     df = df_wh.dropna(subset=[latcol, longcol])
     # filter for specific records from Hunter Survey or Submitter - i.e. based on specific lat/longs, not centroids.
+    # TODO:  add "Email Submission"
     df_select = df[(df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Hunter Survey') | (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'From Submitter')]
     
     logging.info(f"\t{len(df_select)}... records found for Hunter or Submitter locations... of a total of {df_length} sampling records")
@@ -1477,6 +1557,7 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
         static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
         # Compare records and append new flagged hunter survey records to the static DataFrame
+        # TODO:  Compare based on MERGE_ID_TEMP, as WHL_ID is no longer required.  
         new_records = flagged_df[~flagged_df['WLH_ID'].isin(static_df['WLH_ID'])]
         
         logging.info(f"\n... {len(new_records)} new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
@@ -1707,7 +1788,11 @@ def save_public_db_file(df_wh, s3_client, s3_bucket_name):
     df_datadict_keep_for_public = df_datadict[df_datadict['For_Public_Dashboarding'] == 'Yes']
     keep_public_fields = df_datadict_keep_for_public['GIS_FIELD_NAME'].tolist()
     
+
     df_wh_public = df_wh[[col for col in keep_public_fields if col in df_wh.columns]]
+
+    # Exclude UPDATED_WMU_REG_RESPONSIBLE is 'Out of Province'  (added 9-Dec-2025)
+    df_wh_public = df_wh_public[df_wh_public['UPDATED_WMU_REG_RESPONSIBLE'] != 'Out of Province']
 
     # Save/overwrite a copy to a static file name for PowerBI access
     save_xlsx_to_os(s3_client, s3_bucket_name, df_wh_public, 'share_public/cwd_master_public_fields_only.xlsx')
@@ -1745,12 +1830,14 @@ def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime
 
 
     #filter rows to include in the webpage  (Exclude Positive samples)
-    # Exclude CWD_EAR_CARD_ID if Not recorded (added Sept 2025)
+    # Exclude CWD_EAR_CARD_ID if ID is Not recorded (added Sept 2025)
+    # Exclude UPDATED_WMU_REG_RESPONSIBLE is 'Out of Province'  (added 9-Dec-2025)
     incld_sts= ['Pending', 'Negative', 'Unsuitable Tissue', 'Not Tested','pending', 'negative', 'Unsuitable tissue', 'Not tested','unsuitable tissue', 'not tested']
     df_wb = df_wh[
         #(df_wh['CWD_SAMPLED_IND'] == 'Yes') & #Discussed with Shari to include all sampling results, even if not tested.
         (pd.to_datetime(df_wh['SAMPLED_DATE'], errors='coerce') >= pd.Timestamp('2025-09-01')) &
-        (~df_wh['CWD_EAR_CARD_ID'].isin(['Not recorded', 'Not Recorded','']))  & # ~ Exclude
+        (df_wh['UPDATED_WMU_REG_RESPONSIBLE'] != 'Out of Province') &
+        (~df_wh['CWD_EAR_CARD_ID'].isin(['Not recorded', 'Not Recorded','']))  & # ~ means Exclude
         (df_wh['CWD_TEST_STATUS'].isin(incld_sts))
     ]
 
@@ -1759,7 +1846,7 @@ def save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime
     # Filter columns to include in the webpage, based on the For_Results_Query column in the Data Dictionary
     df_datadict_filtered = df_datadict[df_datadict['For_Results_Query'] == 'Yes']
     keep_fields = df_datadict_filtered['GIS_FIELD_NAME'].tolist()
-    print("Columns to keep:", keep_fields)
+    #print("Columns to keep:", keep_fields)
     
     df_wb = df_wb[keep_fields]
 
@@ -2726,11 +2813,14 @@ if __name__ == "__main__":
         df = append_xls_files_from_os(s3_client, s3_bucket_name, folder,'cwd_sample_collection', 2, required_headers=None,sheet_name='Sampling Sheet')
         logging.info(f"Number of Sampling Records from Object Storage:  {len(df)}")
 
-        logging.info('\nRetrieving Centroid CSV Lookup Tables from Object Storage')
+        logging.info('\nGetting Email Submission file with Verified lat/longs from Object Storage') 
+        filepathname = 'incoming_from_idir/cwd_lab_submissions/email_submissions/harvestcoordinates2025_receivedbyemail.xlsx'
+        df_email_submissions = get_email_data_from_os(s3_client, bucket_name=s3_bucket_name, filepathname=filepathname.lower())
+        logging.info(f"Number of Email Submission Records from Object Storage:  {len(df_email_submissions)}")
+        
+        logging.info('\nRetrieving Region and MU Centroid CSV Lookup Tables from Object Storage')
         df_rg, df_mu= get_lookup_tables_from_os(s3_client, bucket_name=s3_bucket_name)
-
-
-    
+        
     logging.info('\nGetting Legacy Hunter Survey Data from AGOL')
     # Using Feature Layer ID is more reliable than the Name, which can be ambiguous.
     #AGO_HUNTER_ITEM='CWD_Hunter_Survey_Responses'
@@ -2747,7 +2837,7 @@ if __name__ == "__main__":
     chefs_df = get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS)
     logging.info(f"Number of active records from CHEFS:  {len(chefs_df)}")
 
-    
+
     surveys_df = combine_survey_info(hunter_df, chefs_df, df)
     logging.info(f"Total number of records from Hunter Survey and CHEFS:  {len(surveys_df)}")
 
@@ -2769,8 +2859,7 @@ if __name__ == "__main__":
     # UPDATED to incorporate CHEFS data.
     df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, surveys_df)
 
-    #print("DONE TO HERE ")
-    #sys.exit()
+    
 
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
     # TODO: Turn back on once CHEFS data is incorporated and confirm if needed and revise as necessary.
@@ -2803,7 +2892,9 @@ if __name__ == "__main__":
     ##save_xlsx_to_os(s3_client, s3_bucket_name, df_wh, 'master_dataset/cwd_master_dataset_sampling_w_hunter.xlsx') #lab + Old S123 hunter data
     save_xlsx_to_os(s3_client, s3_bucket_name, df_wh, 'master_dataset/cwd_master_dataset_sampling_w_survey_results.xlsx') #Newest Master
 
-    
+    #print("DONE TO HERE ")
+    #sys.exit()
+
     logging.info('\nInitiating .... Saving a subset of the dataset for public dashboarding')
     folder= 'share_public/' # this points to GeoDrive
     save_public_db_file (df_wh, s3_client, s3_bucket_name)
