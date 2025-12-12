@@ -994,12 +994,12 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
                     left_on='CWD_EAR_CARD_ID',
                     right_on='Ear Card')
 
-    # Replace any existing values entirely
-    df_wh['UPDATED_LATITUDE']  = df_wh['Latitude']
-    df_wh['UPDATED_LONGITUDE'] = df_wh['Longitude']
-    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = np.where(df_wh['Latitude'].notna() & df_wh['Longitude'].notna(),
-                                                          'Email Submission',                   
-                                                            df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'])
+    # Replaces any existing values 
+    mask = df_wh['Latitude'].notna() & df_wh['Longitude'].notna()
+
+    df_wh['UPDATED_LATITUDE']  = df_wh['UPDATED_LATITUDE'].where(~mask, df_wh['Latitude'])
+    df_wh['UPDATED_LONGITUDE'] = df_wh['UPDATED_LONGITUDE'].where(~mask, df_wh['Longitude'])
+    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'].where(~mask, 'Email Submission')
 
     # Drop unneeded columns
     df_wh = df_wh.drop(columns=['Ear Card', 'Latitude', 'Longitude'])
