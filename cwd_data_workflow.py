@@ -281,6 +281,7 @@ def append_xls_files_from_os(s3_client, bucket_name, folder, file_text, header_i
 def get_email_data_from_os(s3_client, bucket_name,filepathname):
     """
     Returns a DataFrame for the Email Submission file with verified lat/longs, from Object Storage.
+    This is part of the QA process and used to populate missing lat/longs in the master dataset.
     Reads Default header (row 0) and default sheet (first sheet)
     """
     target_key = filepathname
@@ -375,7 +376,7 @@ def get_hunter_data_from_ago(AGO_HUNTER_ITEM_ID):
     return hunter_df
 
 def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
-    # TODO:  Investigate if the CHEFS Reviewer Notes field can be pulled in from the API.
+    # TODO:  Investigate if the CHEFS Reviewer Notes field can be pulled in from the API.  Currently not available.
     logging.info("\nFetching the published version ID of the CHEFS form")
     
     logging.info(f"FORM_ID: {FORM_ID if FORM_ID else 'Missing'}")
@@ -431,11 +432,6 @@ def get_hunter_data_from_chefs(BASE_URL, FORM_ID, API_KEY, CHEFS_HIDDEN_FIELDS):
     # TOGGLE as needed
     save_xlsx_to_os(s3_client, s3_bucket_name, chefs_df, f'chefs_survey/cwd_hunter_survey_data_from_chefs_backup_{current_datetime_str}.xlsx')
 
-
-    # print(chefs_df.dtypes)
-    #print(chefs_df[['createdAt','MORTALITY_DATE','SAMPLED_DATE']])
-    # print(chefs_df.head(20))
-    # print(chefs_df.tail(20))
 
     # Deal with Date/Time columns in CHEFS data and set as pacific time.  Mixed formats in the source data from CHEFS.
     # Convert UTC Date Times  to Pacific Time.  Assumes inputs are Object types.
@@ -562,7 +558,6 @@ def process_master_dataset(df):
     
     def set_source_value(row):
         if pd.notna(row['LATITUDE_DD']) and pd.notna(row['LONGITUDE_DD']):
-            # TODO: Check for  SPATIAL_CAPTURE_DESCRIPTOR is not null (i.e. can be 'Email Response') in sampling sheet, and keep that value.
             if 47.0 <= row['LATITUDE_DD'] <= 60.0 and -145.0 <= row['LONGITUDE_DD'] <= -113.0:
                 return 'From Submitter'
             else:
@@ -1294,9 +1289,12 @@ def check_point_within_poly(df_wh, mu_flayer_sdf, municipality_sdf, buffer_dista
     #Drop rows where updated lat or long is missing
     df = df_wh.dropna(subset=[latcol, longcol])
     # filter for specific records from Hunter Survey or Submitter - i.e. based on specific lat/longs, not centroids.
-    # TODO:  add "Email Submission"
-    df_select = df[(df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Hunter Survey') | (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'From Submitter')]
-    
+    df_select = df[
+        (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Hunter Survey') |
+        (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'From Submitter') |
+        (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Email Submission')
+
+
     logging.info(f"\t{len(df_select)}... records found for Hunter or Submitter locations... of a total of {df_length} sampling records")
     
     # Calc / Recalc default values for QA Checks - overwrites previous values, if any.
@@ -1558,7 +1556,7 @@ def update_sampling_mu_reg_review_tracking_list(flagged_df):
         static_df = pd.read_excel(excel_file, sheet_name='Sheet1')
 
         # Compare records and append new flagged hunter survey records to the static DataFrame
-        # TODO:  Compare based on MERGE_ID_TEMP, as WHL_ID is no longer required.  
+        # TODO:  Compare based on MERGE_ID_TEMP, as WLH_ID is no longer required.  One of WLH_ID or CWD_EAR_CARD_ID must be present.
         new_records = flagged_df[~flagged_df['WLH_ID'].isin(static_df['WLH_ID'])]
         
         logging.info(f"\n... {len(new_records)} new flagged records found for MU or REGION mismatches... compared to {len(static_df)} existing records\n")
@@ -2082,7 +2080,6 @@ def save_tongue_sample_data(df_wh,df_tng_new):
         logging.info(f"{len(df_tng_sampled)}... total merged tongue sample records")
 
         # Strip down/re-order final fields
-        # TODO: Confirm if we want to use the UPDATED WMU /REGION instead or in addition?
         fldList = ['GENOMICS_ID','CWD_LAB_SUBMISSION_ID','SAMPLING_SESSION_ID','WLH_ID','CWD_EAR_CARD_ID','DROPOFF_LOCATION','COLLECTION_DATE','SPECIES','SEX','AGE_CLASS','AGE_ESTIMATE','MORTALITY_CAUSE', 'MORTALITY_DATE', 'SAMPLED_DATE', 'SAMPLE_CONDITION', 'SAMPLE_TONGUE_IND','SAMPLE_EAR_TIP_IND','CWD_TEST_STATUS','WMU_REGION_RESPONSIBLE', 'WMU', 'MU_NUMBER','UPDATED_LATITUDE', 'UPDATED_LONGITUDE', 'UPDATED_SPATIAL_CAPTURE_DESCRIPTOR', 'UPDATED_WMU_REG_RESPONSIBLE','UPDATED_WMU','GIS_LOAD_VERSION_DATE','PREFROZEN', 'STILL_FROZEN', 'SHIPMENT_DEC_2024', 'BOX_NUMBER', 'BOX_LOCATION_NUMBER', 'DATE_SAMPLES_SHIPPED']
         df_tng_sampled = df_tng_sampled[fldList]
 
@@ -2124,7 +2121,7 @@ def save_tongue_sample_data(df_wh,df_tng_new):
     return
 
 
-def publish_feature_layer(gis, df, latcol, longcol, title, folder):
+def publish_feature_layer(gis, df, latcol, longcol, masterFL_item_id, title, folder):
     """
     Publishes the master dataset to AGO, overwriting data if it already exists.
 
@@ -2139,8 +2136,7 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
     df = df.astype(str)
 
     # Drop personal info fields from the dataset
-    # TODO: Confirm if any other fields should be removed.  This could be controlled from the datadictionary 'Skip_for_AGO' field value (i.e. use a filter)
-     # Filter columns to include in the ago dataset, based on the Skip_for_AGO column in the Data Dictionary ( Skip_for_AGO = Yes  means exclude the field)
+    # Filter columns to include in the ago dataset, based on the Skip_for_AGO column in the Data Dictionary ( Skip_for_AGO = Yes  means exclude the field)
     df_datadict_skip_for_ago = df_datadict[df_datadict['Skip_for_AGO'] == 'Yes']
     drop_cols = df_datadict_skip_for_ago['GIS_FIELD_NAME'].tolist()
     #drop_cols = ['SUBMITTER_FIRST_NAME', 'SUBMITTER_LAST_NAME', 'SUBMITTER_PHONE', 'FWID','STATUS_ID']
@@ -2223,49 +2219,70 @@ def publish_feature_layer(gis, df, latcol, longcol, title, folder):
 
     try:
         # Search for existing items (including the GeoJSON file and feature layer)
-        existing_items = gis.content.search(f"(title:{title} OR title:data.geojson) AND owner:{gis.users.me.username}")
+        # Searching on title may lead to issues if multiple items contain the same text (it is not specific).
+        # Must use quotes around title to match exact title.
+
+        #existing_items = gis.content.search(f"(title:{title} OR title:data.geojson) AND owner:{gis.users.me.username}")
+        # Put title in quotes to match exact title
+        json_item = gis.content.search(f'title:"{title}" AND type:"GeoJson" AND owner:{gis.users.me.username}', max_items=1)
+        #json_item = gis.content.get(masterJSON_item_id)
+        print("get() result:", json_item)
+
+        """if json_item:
+            print(f"Found item: {json_item.title} (Type: {json_item.type}, Owner: {json_item.owner})")
+            json_item.delete(force=True, permanent=True)
+            logging.info(f"..existing GeoJSON item '{json_item.title}' permanently deleted.")
+        else:
+            print("JSON Item not found.")"""
 
         # Delete the existing GeoJSON file
-        for item in existing_items:
-            if item.type == 'GeoJson':
-                item.delete(force=True, permanent=True)
-                logging.info(f"..existing GeoJSON item '{item.title}' permanently deleted.")
+        if json_item:
+            print(f"Found {len(json_item)} GeoJSON item(s). Deleting...")
+            for item in json_item:
+                if item.type == 'GeoJson':
+                    item.delete(force=True, permanent=True)
+                    logging.info(f"..existing GeoJSON item '{item.title}' permanently deleted.")
+        else:
+            print("No existing GeoJSON item found.")
 
         # Find the existing feature layer
-        feature_layer_item = None
+        feature_layer_item = gis.content.get(masterFL_item_id)
+        '''feature_layer_item = None
         for item in existing_items:
             if item.type == 'Feature Layer':
                 feature_layer_item = item
-                break   # Exit loop after finding the first feature layer
+                break   # Exit loop after finding the first feature layer'''
 
-        print(f"\nFound {len(existing_items)} existing items with title '{title}'")
-        print(feature_layer_item)
+        
+        if feature_layer_item:
+            print(f"Found item: {feature_layer_item.title} (Type: {feature_layer_item.type}, Owner: {feature_layer_item.owner})")
+        else:
+            print("Feature Layer Item not found.")
 
-        sys.exit()
+
+        #sys.exit()
 
         # Create a new GeoJSON item
         geojson_item_properties = {
             'title': title,
             'type': 'GeoJson',
             'tags': 'sampling points,geojson',
-            'description': 'CWD master dataset containing lab sampling and hunter information',
+            'description': 'CWD master dataset containing sampling and hunter survey information',
             'fileName': 'data.geojson'
         }
         geojson_file = BytesIO(json.dumps(geojson_dict).encode('utf-8'))
         new_geojson_item = gis.content.add(item_properties=geojson_item_properties, data=geojson_file, folder=folder)
 
         # Update the existing feature layer or create a new one if it doesn't exist
-        #  CHECK!   This seems to always use the second method using overwrite, instead of using .update() method.
+        #  CHECK!   This seems to always use the second method using publish/overwrite, instead of using .update() method.
         if feature_layer_item: #and feature_layer_item.type == 'Feature Layer':
-            logging.info(f"..found existing feature layer '{feature_layer_item.title}'")
-        if feature_layer_item and feature_layer_item.type == 'Feature Layer':
             logging.info(f"..found existing feature layer '{feature_layer_item.title}'")
 
         if feature_layer_item:
-            feature_layer_item.update(data=new_geojson_item, folder=folder)
-            logging.info(f"..existing feature layer '{title}' updated successfully.")
-        else:
-            published_item = new_geojson_item.publish(overwrite=True)
+            #feature_layer_item.update(data=new_geojson_item) #, folder=folder)    #Update Not Working
+            #logging.info(f"..existing feature layer '{title}' updated successfully.")
+        #else:
+            published_item = new_geojson_item.publish(overwrite=True)   #Truncates and Overwerites existing data
             logging.info(f"..new feature layer '{title}' published successfully.")
             return published_item
 
@@ -2349,16 +2366,19 @@ def retrieve_field_properties (s3_client, s3_bucket_name):
     return df_datadict, domains_dict, fprop_dict
 
 
-def apply_field_properties(gis, title, domains_dict, fprop_dict):
+def apply_field_domain_properties(gis, title, domains_dict, fprop_dict):
     """Applies Field properities to the published Feature Layer
 
         NOTE:  
         28-Feb-2025     This function is not working as expected.  The field properties are not being updated, e.g. to change the field type from string to integer.
                         A recent AGO update also messed with esriFieldTypeSmallInteger fields and domain values and issues with decimal vs integer values?
 
+        This currenlty only applies coded value domains to fields.
     """
     # Retrieve the published feature layer
-    feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
+    # TO DO:  This is not robust if multiple items have the same title as it searches using 'contains'. Use ItemID
+    #feature_layer_item = gis.content.search(query=title, item_type="Feature Layer")[0]
+    feature_layer_item = gis.content.get(masterFL_item_id)
     feature_layer = feature_layer_item.layers[0]
 
     # Apply Domains
@@ -2374,8 +2394,10 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
         }
         feature_layer.manager.update_definition({"fields": [field_info]})
 
-    # Apply Field Lengths and Types
-    fields = feature_layer.properties['fields']
+    # Apply Field Lengths and Types - Not working?
+    # This may no longer be needed if the field definitions are applied during the initial creation of the hosted feature layer schema.
+    # The JSON overwrite publish method does not retain the field types.
+    '''fields = feature_layer.properties['fields']
     # Update the fields based on the dictionary
     for field in fields:
         field_name = field['name']
@@ -2393,7 +2415,7 @@ def apply_field_properties(gis, title, domains_dict, fprop_dict):
     if 'success' in response and response['success']:
         logging.info("..field properties updated successfully!")
     else:
-        logging.info("..failed to update field properties. Response:", response)
+        logging.info("..failed to update field properties. Response:", response)'''
 
 def truncate_and_load_to_ago(item_id, df,field_definitions, create_type):
     """
@@ -2860,7 +2882,6 @@ if __name__ == "__main__":
     # UPDATED to incorporate CHEFS data.
     df_wh, hs_merged_df, flagged_hs_df = hunter_qa_and_updates_to_master(df, surveys_df)
 
-    
 
     logging.info('\nAdding new hunter survey QA flags to master xls tracking list')
     # TODO: Turn back on once CHEFS data is incorporated and confirm if needed and revise as necessary.
@@ -2905,7 +2926,7 @@ if __name__ == "__main__":
     # #bucket_name_bbx = 'whcwddbcbox' # this points to BCBOX Dev
     # #folder = 'Web/'       # this points to BCBOX
     # #save_web_results (df_wh, s3_client, bucket_name_bbx, folder, current_datetime_str)
-    #bucket_name= s3_bucket_name # this points to GeoDrive
+    # bucket_name= s3_bucket_name # this points to GeoDrive
     folder= 'share_web/' # this points to GeoDrive
     save_web_results (df_wh, s3_client, s3_bucket_name, folder, current_datetime_str)
     
@@ -2914,7 +2935,7 @@ if __name__ == "__main__":
     # bucket_name_bbx= 'whcwddbcbox' # this points to BCBOX Dev
     # folder_bbx= 'Lab/to_Lab/' # this points to BCBOX
     # save_lab_submission (df_wh, s3_client, bucket_name_bbx, folder_bbx)
-    #bucket_name= s3_bucket_name # this points to GeoDrive
+    # bucket_name= s3_bucket_name # this points to GeoDrive
     folder= 'share_labs/for_lab/' # this points to GeoDrive
     save_lab_submission (df_wh, s3_client, s3_bucket_name, folder)
     
@@ -2924,12 +2945,11 @@ if __name__ == "__main__":
     df_tng_new = append_xls_files_from_os(s3_client, s3_bucket_name, folder,'genomebc_tongues', header_index_num=None, required_headers=required_headers, sheet_name=0)
     save_tongue_sample_data(df_wh,df_tng_new)
 
-    #print("DONE TO HERE ")
-    #sys.exit()
-
+    
     # TESTING EXPORTING SPATIAL DATA - not yet implemented in main workflow
     #logging.info('\nSaving spatial data')
     #test_save_spatial_files(df_wh, s3_client, s3_bucket_name)
+    
     
     logging.info(f'\nSummarizing sampling data by spatial units WMU and Environment Region.' )
     df_sampled = df_wh[(df_wh['CWD_SAMPLED_IND'] == 'Yes')]
@@ -2937,25 +2957,26 @@ if __name__ == "__main__":
     sampled_summary_by_unit(df_sampled,'UPDATED_WMU_REG_RESPONSIBLE', 'REGION_RESPONSIBLE_NAME', rg_flayer_lyr, rg_features, rg_flayer_sdf)
     sampled_summary_by_unit(df_sampled,'UPDATED_WMU', 'WILDLIFE_MGMT_UNIT_ID', mu_flayer_lyr, mu_features, mu_flayer_sdf)
 
-
-    '''
-    #15-Sept-2025  Publishing to AGO is currently on hold while we revise the master template and field properties.
-    # TODO: Revise this to point to the new master template, with new CHEFS/Survey Fields and test loading.  Potentially use Truncate and Load function instead, with FL option.
+    
+    # Overwrite the Master Dataset Feature Layer in AGO.
+    # TODO: Note that the intent was to publish into a controlled AGO schema template with proper field definitions/types and aliases.
+    #  However, the field definitions are not being applied correctly when overwriting using the JSON. 
+    #  The JSON publish method does not retain the field types, aliases, etc.
+    #  Ideally, truncate and re-load all records into a controlled AGO schema would be better.
     logging.info('\nPublishing the Master Dataset to AGO')
-    title='CWD_Master_dataset_Template'
-    master_item_id = '555d7896b8914ac993264adcd9d9a547'  
+    title='CWD_Master_dataset'
+    #masterJSON_item_id = '618a68586eea47e4ae06507ee186ad1f'  #This will be overwritten!  Can't use.
+    masterFL_item_id = '18e93feeed4844fe9f1c2db8b45a858e'   # This is the original master, without accurate field definitions/types. It seems to be tied to the JSON types.
     folder='2024_CWD'
     latcol='UPDATED_LATITUDE'
     longcol= 'UPDATED_LONGITUDE'
-    published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
+    #published_item= publish_feature_layer(gis, df_wh, latcol, longcol, title, folder)
+    published_item= publish_feature_layer(gis, df_wh, latcol, longcol, masterFL_item_id, title, folder)
     
     logging.info('\nApplying field properties to the Feature Layer')
     #bucket_name= s3_bucket_name
-    #domains_dict, fprop_dict= retrieve_field_properties(s3_client, s3_bucket_name)
-    apply_field_properties (gis, title, domains_dict, fprop_dict)
+    apply_field_domain_properties (gis, title, domains_dict, fprop_dict)
     
-    '''
-
     finish_t = timeit.default_timer() #finish time
     t_sec = round(finish_t-start_t)
     mins = int (t_sec/60)
