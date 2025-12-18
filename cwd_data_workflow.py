@@ -1292,10 +1292,10 @@ def check_point_within_poly(df_wh, mu_flayer_sdf, municipality_sdf, buffer_dista
     df_select = df[
         (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Hunter Survey') |
         (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'From Submitter') |
-        (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Email Submission')
-
+        (df['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Email Submission')]
 
     logging.info(f"\t{len(df_select)}... records found for Hunter or Submitter locations... of a total of {df_length} sampling records")
+
     
     # Calc / Recalc default values for QA Checks - overwrites previous values, if any.
     df_select['QA_REG_WMU_CHECK'] = ''
