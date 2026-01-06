@@ -43,33 +43,60 @@ The following capabilities are explicitly out of scope for this system:
 ## 4. Major Components
 
 ### 4.1 Client / User Interface
-**Responsibility**
-- What this component does
+Clients interact with the system through three primary access patterns, each optimized for a different audience and use case. These interaction modes are intentionally separated to support appropriate data governance, performance, and user experience requirements.
 
-**Key Technologies**
-- Frameworks, libraries, protocols
+#### 4.1.1 Public Record Lookup (Self-Service Access)
 
-**Notes**
-- Assumptions or constraints
+Members of the public access individual records associated with harvested animals through a public-facing web interface. Users enter a unique access key into a search field, which triggers a client-side request to retrieve and display the corresponding record.
+
+**Characteristics**
+- Read-only access
+- Record-level scope only (no bulk access)
+- Key-based access controls
+- Designed for ease of use and low technical literacy
+
+**Constraints**
+- No public data submission or modification
+- Limited to pre-approved fields suitable for public release
+- Optimized for lookup, not exploration or analysis
+
+#### 4.1.2 Internal Analytics and Reporting (PowerBI)
+
+Internal stakeholders primarily interact with the data through a Power BI dashboard that provides aggregated statistics, trends, and spatial visualizations related to Chronic Wasting Disease (CWD).
+
+**Characteristics**
+- Summary-level and aggregated views
+- Spatial and temporal analysis
+- Role-based access controls
+- Read-optimized data views
+
+**Typical Use Cases**
+- Program oversight and reporting
+- Trend monitoring
+- Decision support
+
+**Constraints**
+- Not intended for record-level editing
+- May contain sensitive information not suitable for broad distribution
+- Data refresh frequency is aligned with scheduled ETL processes rather than real-time updates
+
+#### 4.1.3 Internal Data Review and QA/QC (Spreadsheet Access)
+
+Internal users also access a locally stored spreadsheet hosted on a secured network drive for limited manual data review and quality assurance activities.
+
+**Characteristics**
+- Used for spot checks and ad hoc QA/QC
+- Access restricted to authorized internal users
+- Supports manual review workflows not easily expressed in dashboards
+
+**Constraints**
+- Not a system of record
+- Manual edits do not directly propagate back into upstream source systems
+- Intended for temporary review rather than ongoing data management
 
 ---
 
-### 4.2 API / Application Layer
-**Responsibility**
-- Business logic
-- Validation
-- Authorization
-
-**Key Technologies**
-- Language, framework, hosting model
-
-**Notes**
-- Stateless vs stateful
-- Scaling considerations
-
----
-
-### 4.3 Data Storage
+### 4.2 Data Storage
 **Responsibility**
 - Persistence
 - Versioning
