@@ -10,7 +10,7 @@
 # Author:      Moez Labiadh - GeoBC 
 #
 # Created:     2024-08-20
-# Updated:     
+# Updated:     2026-07-23
 #-------------------------------------------------------------------------------
 
 import warnings
@@ -81,6 +81,29 @@ def get_dropoff_locations(s3_client, bucket_name):
     # Read the excel into df
     df= pd.read_excel(excel_file, sheet_name='DropOff_Locations', header=1)
 
+    # Normalize whitespace, including line breaks within headings
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace(r'\s+', ' ', regex=True)
+        .str.strip()
+    )
+    
+    df = df.rename(columns={
+        'Region': 'REGION',
+        'Location Name': 'LOCATION_NAME',
+        'Civic Address': 'CIVIC_ADDRESS',
+        'City': 'CITY',
+        'Postal Code': 'POSTAL_CODE',
+        '24/7 Access': '24/7_ACCESS',
+        'Details': 'MORE_INFO',
+        'Contact Name': 'CONTACT_NAME',
+        'Contact Information': 'CONTACT_INFO',
+        'Use for Public Map (must not be a private number)': 'PUBLIC_CONTACT_INFO_IND',
+        'Notes': 'NOTES',
+        'Confirmed': 'CONFIRMED',
+        'On Website (Text Table)': 'ON_WEBSITE'
+    })
+    
     # Keep only confirmed location rows
     df= df[df['CONFIRMED']=='Yes']
 
