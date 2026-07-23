@@ -79,7 +79,7 @@ def get_dropoff_locations(s3_client, bucket_name):
     excel_file = pd.ExcelFile(BytesIO(data))
 
     # Read the excel into df
-    df= pd.read_excel(excel_file, sheet_name='DropOff_Locations', header=2)
+    df= pd.read_excel(excel_file, sheet_name='DropOff_Locations', header=1)
 
     # Keep only confirmed location rows
     df= df[df['CONFIRMED']=='Yes']
