@@ -2837,7 +2837,7 @@ if __name__ == "__main__":
         logging.info(f"Number of Sampling Records from Object Storage:  {len(df)}")
 
         logging.info('\nGetting Email Submission file with Verified lat/longs from Object Storage') 
-        filepathname = 'incoming_from_idir/cwd_lab_submissions/email_submissions/harvestcoordinates2025_receivedbyemail.xlsx'
+        filepathname = 'incoming_from_idir/cwd_lab_submissions/email_submissions/harvestcoordinates_manualupdates.xlsx'
         df_email_submissions = get_email_data_from_os(s3_client, bucket_name=s3_bucket_name, filepathname=filepathname.lower())
         logging.info(f"Number of Email Submission Records from Object Storage:  {len(df_email_submissions)}")
         
