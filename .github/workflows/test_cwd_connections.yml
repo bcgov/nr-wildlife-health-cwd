@@ -1,0 +1,32 @@
+name: Test CWD Connections
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-connections:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test connections
+        env:
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_CWD_ACCESS_KEY: ${{ secrets.S3_CWD_ACCESS_KEY }}
+          S3_CWD_SECRET_KEY: ${{ secrets.S3_CWD_SECRET_KEY }}
+
+          AGO_HOST: ${{ secrets.AGO_HOST }}
+          AGO_USERNAME: ${{ secrets.AGO_USERNAME }}
+          AGO_PASSWORD: ${{ secrets.AGO_PASSWORD }}
+
+        run: python scripts/test_connections.py
