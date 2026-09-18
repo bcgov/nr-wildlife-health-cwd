@@ -7,14 +7,105 @@ jobs:
   cwd-public-reporting:
     runs-on: ubuntu-latest
 
+    # =================================================================
+    # Pipeline configuration
+    # =================================================================
+    env:
+
+      # ---------------------------------------------------------------
+      # Runtime behaviour
+      # ---------------------------------------------------------------
+      PYTHONDONTWRITEBYTECODE: "1"
+
+
+      # ---------------------------------------------------------------
+      # Object Storage credentials
+      #
+      # These remain GitHub Actions Secrets.
+      # ---------------------------------------------------------------
+      S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+      S3_CWD_ACCESS_KEY: ${{ secrets.S3_CWD_ACCESS_KEY }}
+      S3_CWD_SECRET_KEY: ${{ secrets.S3_CWD_SECRET_KEY }}
+
+
+      # ---------------------------------------------------------------
+      # Object Storage input
+      # ---------------------------------------------------------------
+      S3_INPUT_BUCKET: "whcwdp"
+
+      S3_INPUT_KEY: >-
+        master_dataset/cwd_master_dataset_sampling_w_survey_results.xlsx
+
+
+      # ---------------------------------------------------------------
+      # Object Storage outputs
+      #
+      # All Excel outputs from this pipeline will be written beneath:
+      #
+      # whcwdp/CWD_Reporting_Staging/
+      # ---------------------------------------------------------------
+      S3_OUTPUT_BUCKET: "whcwdp"
+
+      S3_OUTPUT_PREFIX: "CWD_Reporting_Staging"
+
+
+      # ---------------------------------------------------------------
+      # Excel / ETL configuration
+      # ---------------------------------------------------------------
+      SHEET_NAME: "0"
+
+      PRIMARY_KEY: "CWD_EAR_CARD_ID"
+
+
+      # ---------------------------------------------------------------
+      # ArcGIS Online credentials
+      #
+      # These remain GitHub Actions Secrets.
+      # ---------------------------------------------------------------
+      AGO_HOST: ${{ secrets.AGO_HOST }}
+      AGO_USERNAME: ${{ secrets.AGO_USERNAME }}
+      AGO_PASSWORD: ${{ secrets.AGO_PASSWORD }}
+
+
+      # ---------------------------------------------------------------
+      # ArcGIS WMU summary layer
+      # ---------------------------------------------------------------
+      WMU_SUMMARY_ITEM_ID: "cf139e93381b45db9c9de0a6db36f9c9"
+
+      WMU_SUMMARY_GROUP_ID: "5fbbdb61353a41dcb7c26601a2b9f1a8"
+
+      WMU_SUMMARY_LAYER_TITLE: "CWD WMU Summary by WMU"
+
+      WMU_SUMMARY_LAYER_TAGS: "CWD,WMU,summary,wildlife"
+
+      # Leave blank if the existing item does not need to be placed
+      # into a specific AGOL folder.
+      WMU_SUMMARY_FOLDER: ""
+
+
     steps:
+
+      # =================================================================
+      # Checkout
+      # =================================================================
+
       - name: Checkout repository
         uses: actions/checkout@v7
+
+
+      # =================================================================
+      # Python
+      # =================================================================
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.9"
+
+
+      # =================================================================
+      # Dependency cache
+      # =================================================================
 
       - name: Restore pip cache
         id: pip-cache
@@ -23,14 +114,27 @@ jobs:
           path: ~/.cache/pip
           key: ${{ runner.os }}-python39-pip-${{ hashFiles('requirements.txt') }}
 
+
+      # =================================================================
+      # Linux dependencies required by ArcGIS Python API
+      # =================================================================
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libkrb5-dev
 
+
+      # =================================================================
+      # Python dependencies
+      # =================================================================
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+
+      # Save immediately after installation so the cache survives even
+      # if the pipeline itself fails later.
       - name: Save pip cache
         if: steps.pip-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
@@ -38,56 +142,21 @@ jobs:
           path: ~/.cache/pip
           key: ${{ steps.pip-cache.outputs.cache-primary-key }}
 
+
+      # =================================================================
+      # Run CWD pipeline
+      # =================================================================
+
       - name: Run CWD public reporting pipeline
-        env:
-          # -----------------------------------------------------------
-          # Runtime behaviour
-          # -----------------------------------------------------------
-          PYTHONDONTWRITEBYTECODE: "1"
-
-          # -----------------------------------------------------------
-          # Object Storage credentials
-          # Keep these in GitHub Actions Secrets.
-          # -----------------------------------------------------------
-          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
-          S3_CWD_ACCESS_KEY: ${{ secrets.S3_CWD_ACCESS_KEY }}
-          S3_CWD_SECRET_KEY: ${{ secrets.S3_CWD_SECRET_KEY }}
-
-          # -----------------------------------------------------------
-          # Object Storage locations
-          # Recommended as GitHub Actions Variables unless your
-          # organization considers bucket/key names sensitive.
-          # -----------------------------------------------------------
-          S3_INPUT_BUCKET: ${{ vars.S3_INPUT_BUCKET }}
-          S3_INPUT_KEY: ${{ vars.S3_INPUT_KEY }}
-          S3_OUTPUT_BUCKET: ${{ vars.S3_OUTPUT_BUCKET }}
-          S3_OUTPUT_PREFIX: ${{ vars.S3_OUTPUT_PREFIX }}
-
-          # -----------------------------------------------------------
-          # Excel / ETL configuration
-          # -----------------------------------------------------------
-          SHEET_NAME: "0"
-          PRIMARY_KEY: "CWD_EAR_CARD_ID"
-
-          # -----------------------------------------------------------
-          # ArcGIS credentials
-          # Keep these in GitHub Actions Secrets.
-          # -----------------------------------------------------------
-          AGO_HOST: ${{ secrets.AGO_HOST }}
-          AGO_USERNAME: ${{ secrets.AGO_USERNAME }}
-          AGO_PASSWORD: ${{ secrets.AGO_PASSWORD }}
-
-          # -----------------------------------------------------------
-          # ArcGIS publishing configuration
-          # Use GitHub Actions Variables.
-          # -----------------------------------------------------------
-          WMU_SUMMARY_ITEM_ID: ${{ vars.WMU_SUMMARY_ITEM_ID }}
-          WMU_SUMMARY_GROUP_ID: ${{ vars.WMU_SUMMARY_GROUP_ID }}
-          WMU_SUMMARY_LAYER_TITLE: ${{ vars.WMU_SUMMARY_LAYER_TITLE }}
-          WMU_SUMMARY_LAYER_TAGS: ${{ vars.WMU_SUMMARY_LAYER_TAGS }}
-          WMU_SUMMARY_FOLDER: ${{ vars.WMU_SUMMARY_FOLDER }}
-
         run: python scripts/cwd_public_reporting_pipeline.py
+
+
+      # =================================================================
+      # Safety check
+      #
+      # The pipeline should write Excel outputs directly to Object
+      # Storage. It should not leave generated files in the repository.
+      # =================================================================
 
       - name: Verify repository remained clean
         run: |
