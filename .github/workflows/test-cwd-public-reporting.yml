@@ -150,6 +150,55 @@ jobs:
       - name: Run CWD public reporting pipeline
         run: python scripts/cwd_public_reporting_pipeline.py
 
+      # =================================================================
+      # Verify Files
+      # =================================================================
+
+      - name: Verify S3 output files
+        run: |
+          python - <<'PY'
+          import os
+          import boto3
+          from botocore.config import Config
+
+          s3 = boto3.client(
+              "s3",
+              endpoint_url=os.environ["S3_ENDPOINT"],
+              aws_access_key_id=os.environ["S3_CWD_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["S3_CWD_SECRET_KEY"],
+              config=Config(
+                  retries={
+                      "max_attempts": 5,
+                      "mode": "standard",
+                  }
+              ),
+          )
+
+          bucket = os.environ["S3_OUTPUT_BUCKET"]
+          prefix = os.environ["S3_OUTPUT_PREFIX"].strip("/") + "/"
+
+          print(f"Checking s3://{bucket}/{prefix}")
+
+          response = s3.list_objects_v2(
+              Bucket=bucket,
+              Prefix=prefix,
+          )
+
+          objects = response.get("Contents", [])
+
+          if not objects:
+              raise RuntimeError(
+                  f"No objects found under s3://{bucket}/{prefix}"
+              )
+
+          print(f"Found {len(objects)} object(s):")
+
+          for obj in objects:
+              print(
+                  f"  {obj['Key']} "
+                  f"({obj['Size']:,} bytes)"
+              )
+          PY
 
       # =================================================================
       # Safety check
