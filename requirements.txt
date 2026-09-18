@@ -7,3 +7,4 @@ geopandas
 shapely
 fiona
 openpyxl
+plotly
