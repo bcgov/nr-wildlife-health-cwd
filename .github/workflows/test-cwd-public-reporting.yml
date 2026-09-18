@@ -1,0 +1,100 @@
+name: Test CWD Public Reporting Pipeline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cwd-public-reporting:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+
+      - name: Restore pip cache
+        id: pip-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-python39-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libkrb5-dev
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Save pip cache
+        if: steps.pip-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/pip
+          key: ${{ steps.pip-cache.outputs.cache-primary-key }}
+
+      - name: Run CWD public reporting pipeline
+        env:
+          # -----------------------------------------------------------
+          # Runtime behaviour
+          # -----------------------------------------------------------
+          PYTHONDONTWRITEBYTECODE: "1"
+
+          # -----------------------------------------------------------
+          # Object Storage credentials
+          # Keep these in GitHub Actions Secrets.
+          # -----------------------------------------------------------
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_CWD_ACCESS_KEY: ${{ secrets.S3_CWD_ACCESS_KEY }}
+          S3_CWD_SECRET_KEY: ${{ secrets.S3_CWD_SECRET_KEY }}
+
+          # -----------------------------------------------------------
+          # Object Storage locations
+          # Recommended as GitHub Actions Variables unless your
+          # organization considers bucket/key names sensitive.
+          # -----------------------------------------------------------
+          S3_INPUT_BUCKET: ${{ vars.S3_INPUT_BUCKET }}
+          S3_INPUT_KEY: ${{ vars.S3_INPUT_KEY }}
+          S3_OUTPUT_BUCKET: ${{ vars.S3_OUTPUT_BUCKET }}
+          S3_OUTPUT_PREFIX: ${{ vars.S3_OUTPUT_PREFIX }}
+
+          # -----------------------------------------------------------
+          # Excel / ETL configuration
+          # -----------------------------------------------------------
+          SHEET_NAME: "0"
+          PRIMARY_KEY: "CWD_EAR_CARD_ID"
+
+          # -----------------------------------------------------------
+          # ArcGIS credentials
+          # Keep these in GitHub Actions Secrets.
+          # -----------------------------------------------------------
+          AGO_HOST: ${{ secrets.AGO_HOST }}
+          AGO_USERNAME: ${{ secrets.AGO_USERNAME }}
+          AGO_PASSWORD: ${{ secrets.AGO_PASSWORD }}
+
+          # -----------------------------------------------------------
+          # ArcGIS publishing configuration
+          # Use GitHub Actions Variables.
+          # -----------------------------------------------------------
+          WMU_SUMMARY_ITEM_ID: ${{ vars.WMU_SUMMARY_ITEM_ID }}
+          WMU_SUMMARY_GROUP_ID: ${{ vars.WMU_SUMMARY_GROUP_ID }}
+          WMU_SUMMARY_LAYER_TITLE: ${{ vars.WMU_SUMMARY_LAYER_TITLE }}
+          WMU_SUMMARY_LAYER_TAGS: ${{ vars.WMU_SUMMARY_LAYER_TAGS }}
+          WMU_SUMMARY_FOLDER: ${{ vars.WMU_SUMMARY_FOLDER }}
+
+        run: python scripts/cwd_public_reporting_pipeline.py
+
+      - name: Verify repository remained clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Unexpected files or modifications were created in the repository:"
+            git status --short
+            exit 1
+          fi
+
+          echo "Repository is clean."
