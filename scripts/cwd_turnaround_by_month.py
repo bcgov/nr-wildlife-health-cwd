@@ -1,8 +1,9 @@
-"""Generate the monthly CWD test turnaround-time chart in object storage.
+"""Generate monthly CWD turnaround-time reporting outputs in object storage.
 
 This GitHub Actions version reads the public-reporting workbook directly from
-S3-compatible object storage and uploads the finished HTML directly to object
-storage. It does not create files in the checked-out repository.
+S3-compatible object storage and uploads the finished HTML, monthly summary
+workbook, and IQR outlier audit directly to object storage. It does not create
+files in the checked-out repository.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from typing import Union
 
 import boto3
 from botocore.config import Config
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -83,6 +86,14 @@ S3_OUTPUT_BUCKET = optional_env("S3_OUTPUT_BUCKET", "whcwdpbcbox")
 S3_HTML_OUTPUT_KEY = optional_env(
     "S3_HTML_OUTPUT_KEY",
     "cwd_turnaround_by_month.html",
+)
+S3_SUMMARY_EXCEL_OUTPUT_KEY = optional_env(
+    "S3_SUMMARY_EXCEL_OUTPUT_KEY",
+    "cwd_turnaround_by_month_summary.xlsx",
+)
+S3_OUTLIER_AUDIT_OUTPUT_KEY = optional_env(
+    "S3_OUTLIER_AUDIT_OUTPUT_KEY",
+    "cwd_turnaround_by_month_outliers.xlsx",
 )
 SHEET_NAME = parse_sheet_name(optional_env("SHEET_NAME", "0"))
 
@@ -305,6 +316,37 @@ def upload_html(
     logger.info("HTML upload complete.")
 
 
+def upload_excel(
+    s3_client,
+    workbook_bytes: bytes,
+    bucket: str,
+    key: str,
+) -> None:
+    """Upload an Excel workbook directly to object storage."""
+
+    if not workbook_bytes:
+        raise ValueError(f"Refusing to upload an empty workbook: {key}")
+
+    logger.info(
+        "Uploading Excel workbook to s3://%s/%s (%s bytes)",
+        bucket,
+        key,
+        f"{len(workbook_bytes):,}",
+    )
+
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=workbook_bytes,
+        ContentType=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+    )
+
+    logger.info("Excel upload complete: s3://%s/%s", bucket, key)
+
+
 # =============================================================================
 # Prepare turnaround-time records
 # =============================================================================
@@ -332,10 +374,31 @@ def prepare_turnaround_data(df: pd.DataFrame) -> pd.DataFrame:
 
     working_df = df.copy()
 
-    working_df[DATE_FIELD] = pd.to_datetime(
-        working_df[DATE_FIELD],
-        errors="coerce",
+    if "SOURCE_EXCEL_ROW" in working_df.columns:
+        raise KeyError(
+            "The reserved audit field SOURCE_EXCEL_ROW already exists "
+            "in the input workbook."
+        )
+
+    # Pandas row 0 corresponds to Excel row 2 because row 1 is the header.
+    working_df.insert(
+        0,
+        "SOURCE_EXCEL_ROW",
+        range(2, len(working_df) + 2),
     )
+
+    date_values = working_df[DATE_FIELD]
+    if pd.api.types.is_datetime64_any_dtype(date_values):
+        working_df[DATE_FIELD] = pd.to_datetime(
+            date_values,
+            errors="coerce",
+        )
+    else:
+        # Scalar conversion safely handles columns containing a mixture of
+        # date-only strings, timestamps, and Excel datetime values.
+        working_df[DATE_FIELD] = date_values.map(
+            lambda value: pd.to_datetime(value, errors="coerce")
+        )
 
     working_df[TURNAROUND_FIELD] = pd.to_numeric(
         working_df[TURNAROUND_FIELD],
@@ -378,6 +441,30 @@ def prepare_turnaround_data(df: pd.DataFrame) -> pd.DataFrame:
     return working_df
 
 
+def filter_reporting_window(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only records represented by the chart's completed-month window."""
+
+    end_exclusive = CHART_END_DATE + pd.Timedelta(days=1)
+    reporting_df = df[
+        (df[DATE_FIELD] >= CHART_START_DATE)
+        & (df[DATE_FIELD] < end_exclusive)
+    ].copy()
+
+    logger.info(
+        "%s of %s valid records fall within the reporting window",
+        f"{len(reporting_df):,}",
+        f"{len(df):,}",
+    )
+
+    if reporting_df.empty:
+        raise ValueError(
+            "No valid turnaround-time records fall within the reporting "
+            "window."
+        )
+
+    return reporting_df
+
+
 # =============================================================================
 # Remove outliers
 # =============================================================================
@@ -385,12 +472,12 @@ def prepare_turnaround_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def remove_outliers(
     df: pd.DataFrame,
-) -> tuple[pd.DataFrame, float, float]:
+) -> tuple[pd.DataFrame, pd.DataFrame, float, float]:
     """
     Remove turnaround-time outliers using the standard 1.5 x IQR rule.
 
-    One threshold is calculated across the entire dataset so every month uses
-    the same definition of an outlier.
+    One threshold is calculated across the reporting window so every displayed
+    month uses the same definition of an outlier.
     """
 
     values = df[TURNAROUND_FIELD]
@@ -424,6 +511,20 @@ def remove_outliers(
     )
 
     cleaned_df = df.loc[~outlier_mask].copy()
+    outliers_df = df.loc[outlier_mask].copy()
+
+    outliers_df.insert(
+        1,
+        "OUTLIER_REASON",
+        "Above upper IQR bound",
+    )
+    outliers_df.loc[
+        outliers_df[TURNAROUND_FIELD] < lower_bound,
+        "OUTLIER_REASON",
+    ] = "Below lower IQR bound"
+    outliers_df.insert(2, "IQR_LOWER_BOUND_DAYS", lower_bound)
+    outliers_df.insert(3, "IQR_UPPER_BOUND_DAYS", upper_bound)
+    outliers_df.insert(4, "IQR_MULTIPLIER", IQR_MULTIPLIER)
 
     logger.info(
         "%s records remain after outlier removal",
@@ -435,7 +536,7 @@ def remove_outliers(
             "No turnaround-time records remain after outlier removal."
         )
 
-    return cleaned_df, lower_bound, upper_bound
+    return cleaned_df, outliers_df, lower_bound, upper_bound
 
 
 # =============================================================================
@@ -443,24 +544,45 @@ def remove_outliers(
 # =============================================================================
 
 
-def build_monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate monthly average and median turnaround time."""
+def build_monthly_summary(
+    cleaned_df: pd.DataFrame,
+    outliers_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Calculate monthly chart values and supporting summary statistics."""
 
-    df = df.copy()
+    cleaned_df = cleaned_df.copy()
+    outliers_df = outliers_df.copy()
 
-    df["MONTH"] = (
-        df[DATE_FIELD]
+    cleaned_df["MONTH"] = (
+        cleaned_df[DATE_FIELD]
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+    outliers_df["MONTH"] = (
+        outliers_df[DATE_FIELD]
         .dt.to_period("M")
         .dt.to_timestamp()
     )
 
     monthly = (
-        df.groupby("MONTH")
+        cleaned_df.groupby("MONTH")
         .agg(
             AVERAGE_DAYS=(TURNAROUND_FIELD, "mean"),
             MEDIAN_DAYS=(TURNAROUND_FIELD, "median"),
+            MINIMUM_DAYS=(TURNAROUND_FIELD, "min"),
+            MAXIMUM_DAYS=(TURNAROUND_FIELD, "max"),
+            Q1_DAYS=(TURNAROUND_FIELD, lambda values: values.quantile(0.25)),
+            Q3_DAYS=(TURNAROUND_FIELD, lambda values: values.quantile(0.75)),
+            STANDARD_DEVIATION_DAYS=(TURNAROUND_FIELD, "std"),
             SAMPLE_COUNT=(TURNAROUND_FIELD, "size"),
         )
+        .reset_index()
+    )
+
+    monthly_outliers = (
+        outliers_df.groupby("MONTH")
+        .size()
+        .rename("OUTLIERS_REMOVED")
         .reset_index()
     )
 
@@ -480,6 +602,22 @@ def build_monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
         on="MONTH",
         how="left",
     )
+    monthly = monthly.merge(
+        monthly_outliers,
+        on="MONTH",
+        how="left",
+    )
+
+    for count_field in ("SAMPLE_COUNT", "OUTLIERS_REMOVED"):
+        monthly[count_field] = (
+            monthly[count_field]
+            .fillna(0)
+            .astype(int)
+        )
+
+    monthly["VALID_SAMPLE_COUNT"] = (
+        monthly["SAMPLE_COUNT"] + monthly["OUTLIERS_REMOVED"]
+    )
 
     monthly["MONTH_LABEL"] = monthly["MONTH"].dt.strftime("%B %Y")
 
@@ -490,6 +628,373 @@ def build_monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return monthly
+
+
+# =============================================================================
+# Create Excel workbooks
+# =============================================================================
+
+
+def style_excel_sheet(
+    worksheet,
+    *,
+    freeze_panes: str,
+    number_formats: dict[str, str],
+    tab_color: str,
+) -> None:
+    """Apply readable, restrained formatting to an exported worksheet."""
+
+    header_fill = PatternFill("solid", fgColor="213C6E")
+    band_fill = PatternFill("solid", fgColor="F1F4F6")
+    header_font = Font(
+        name="Arial",
+        size=10,
+        bold=True,
+        color="FFFFFF",
+    )
+    body_font = Font(name="Arial", size=10, color="2F2F2F")
+
+    worksheet.sheet_view.showGridLines = False
+    worksheet.sheet_properties.tabColor = tab_color
+    worksheet.freeze_panes = freeze_panes
+    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.row_dimensions[1].height = 32
+
+    headers = {
+        cell.value: cell.column
+        for cell in worksheet[1]
+        if cell.value is not None
+    }
+
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+
+    for row_number in range(2, worksheet.max_row + 1):
+        use_band_fill = row_number % 2 == 0
+        for cell in worksheet[row_number]:
+            cell.font = body_font
+            cell.alignment = Alignment(vertical="center")
+            if use_band_fill:
+                cell.fill = band_fill
+
+    for header, number_format in number_formats.items():
+        column_number = headers.get(header)
+        if column_number is None:
+            continue
+        for row_number in range(2, worksheet.max_row + 1):
+            worksheet.cell(
+                row=row_number,
+                column=column_number,
+            ).number_format = number_format
+
+    # Widths are based on the header and a bounded sample of data rows.
+    sampled_last_row = min(worksheet.max_row, 251)
+    for column_number in range(1, worksheet.max_column + 1):
+        values = [
+            worksheet.cell(row=row_number, column=column_number).value
+            for row_number in range(1, sampled_last_row + 1)
+        ]
+        max_length = max(
+            (len(str(value)) for value in values if value is not None),
+            default=0,
+        )
+        width = min(max(max_length + 2, 11), 42)
+        worksheet.column_dimensions[
+            get_column_letter(column_number)
+        ].width = width
+
+
+def build_overall_summary(
+    reporting_df: pd.DataFrame,
+    cleaned_df: pd.DataFrame,
+    outliers_df: pd.DataFrame,
+    lower_bound: float,
+    upper_bound: float,
+) -> pd.DataFrame:
+    """Create the report-level summary used by both Excel outputs."""
+
+    outlier_percentage = len(outliers_df) / len(reporting_df)
+    generated_at = pd.Timestamp.now(tz=REPORTING_TIMEZONE).strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+
+    rows = [
+        {
+            "Metric": "Generated at",
+            "Value": generated_at,
+            "Notes": "Reporting timezone",
+        },
+        {
+            "Metric": "Reporting window start",
+            "Value": CHART_START_DATE,
+            "Notes": "First displayed month",
+        },
+        {
+            "Metric": "Reporting window end",
+            "Value": CHART_END_DATE,
+            "Notes": "Final day of the last completed month",
+        },
+        {
+            "Metric": "IQR multiplier",
+            "Value": IQR_MULTIPLIER,
+            "Notes": "Tukey IQR rule",
+        },
+        {
+            "Metric": "Lower IQR bound (days)",
+            "Value": lower_bound,
+            "Notes": "Values below this bound are excluded",
+        },
+        {
+            "Metric": "Upper IQR bound (days)",
+            "Value": upper_bound,
+            "Notes": "Values above this bound are excluded",
+        },
+        {
+            "Metric": "Valid samples before IQR",
+            "Value": len(reporting_df),
+            "Notes": "Valid date and non-negative turnaround time",
+        },
+        {
+            "Metric": "Outliers removed",
+            "Value": len(outliers_df),
+            "Notes": "Samples outside the global IQR bounds",
+        },
+        {
+            "Metric": "Outliers removed (%)",
+            "Value": outlier_percentage,
+            "Notes": "Share of valid samples in the reporting window",
+        },
+        {
+            "Metric": "Samples included in chart",
+            "Value": len(cleaned_df),
+            "Notes": "Valid samples after IQR removal",
+        },
+        {
+            "Metric": "Mean turnaround (days)",
+            "Value": cleaned_df[TURNAROUND_FIELD].mean(),
+            "Notes": "After IQR removal",
+        },
+        {
+            "Metric": "Median turnaround (days)",
+            "Value": cleaned_df[TURNAROUND_FIELD].median(),
+            "Notes": "After IQR removal",
+        },
+        {
+            "Metric": "Minimum turnaround (days)",
+            "Value": cleaned_df[TURNAROUND_FIELD].min(),
+            "Notes": "After IQR removal",
+        },
+        {
+            "Metric": "Maximum turnaround (days)",
+            "Value": cleaned_df[TURNAROUND_FIELD].max(),
+            "Notes": "After IQR removal",
+        },
+    ]
+
+    return pd.DataFrame(rows)
+
+
+def style_overall_summary_sheet(worksheet) -> None:
+    """Apply formats that depend on the metric name in the first column."""
+
+    style_excel_sheet(
+        worksheet,
+        freeze_panes="A2",
+        number_formats={},
+        tab_color="149ECE",
+    )
+
+    worksheet.column_dimensions["A"].width = 30
+    worksheet.column_dimensions["B"].width = 24
+    worksheet.column_dimensions["C"].width = 48
+
+    for row_number in range(2, worksheet.max_row + 1):
+        metric = worksheet.cell(row=row_number, column=1).value
+        value_cell = worksheet.cell(row=row_number, column=2)
+
+        if metric in {"Reporting window start", "Reporting window end"}:
+            value_cell.number_format = "yyyy-mm-dd"
+        elif metric == "Outliers removed (%)":
+            value_cell.number_format = "0.0%"
+        elif metric in {
+            "Valid samples before IQR",
+            "Outliers removed",
+            "Samples included in chart",
+        }:
+            value_cell.number_format = "#,##0"
+        elif isinstance(value_cell.value, (int, float)):
+            value_cell.number_format = "0.0"
+
+
+def create_summary_workbook(
+    monthly_df: pd.DataFrame,
+    reporting_df: pd.DataFrame,
+    cleaned_df: pd.DataFrame,
+    outliers_df: pd.DataFrame,
+    lower_bound: float,
+    upper_bound: float,
+) -> bytes:
+    """Create the chart-data and report-statistics Excel workbook."""
+
+    monthly_export = monthly_df[
+        [
+            "MONTH",
+            "AVERAGE_DAYS",
+            "MEDIAN_DAYS",
+            "MINIMUM_DAYS",
+            "MAXIMUM_DAYS",
+            "Q1_DAYS",
+            "Q3_DAYS",
+            "STANDARD_DEVIATION_DAYS",
+            "SAMPLE_COUNT",
+            "VALID_SAMPLE_COUNT",
+            "OUTLIERS_REMOVED",
+        ]
+    ].rename(
+        columns={
+            "MONTH": "Month",
+            "AVERAGE_DAYS": "Mean days (graph value)",
+            "MEDIAN_DAYS": "Median days",
+            "MINIMUM_DAYS": "Minimum days",
+            "MAXIMUM_DAYS": "Maximum days",
+            "Q1_DAYS": "Q1 days",
+            "Q3_DAYS": "Q3 days",
+            "STANDARD_DEVIATION_DAYS": "Standard deviation days",
+            "SAMPLE_COUNT": "Samples included",
+            "VALID_SAMPLE_COUNT": "Valid samples before IQR",
+            "OUTLIERS_REMOVED": "Outliers removed",
+        }
+    )
+
+    overall_export = build_overall_summary(
+        reporting_df,
+        cleaned_df,
+        outliers_df,
+        lower_bound,
+        upper_bound,
+    )
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(
+        buffer,
+        engine="openpyxl",
+        datetime_format="yyyy-mm-dd",
+    ) as writer:
+        monthly_export.to_excel(
+            writer,
+            sheet_name="Monthly Summary",
+            index=False,
+        )
+        overall_export.to_excel(
+            writer,
+            sheet_name="Overall Summary",
+            index=False,
+        )
+
+        monthly_sheet = writer.sheets["Monthly Summary"]
+        style_excel_sheet(
+            monthly_sheet,
+            freeze_panes="B2",
+            number_formats={
+                "Month": "mmmm yyyy",
+                "Mean days (graph value)": "0.0",
+                "Median days": "0.0",
+                "Minimum days": "0.0",
+                "Maximum days": "0.0",
+                "Q1 days": "0.0",
+                "Q3 days": "0.0",
+                "Standard deviation days": "0.0",
+                "Samples included": "#,##0",
+                "Valid samples before IQR": "#,##0",
+                "Outliers removed": "#,##0",
+            },
+            tab_color="213C6E",
+        )
+        style_overall_summary_sheet(writer.sheets["Overall Summary"])
+
+    return buffer.getvalue()
+
+
+def create_outlier_audit_workbook(
+    reporting_df: pd.DataFrame,
+    cleaned_df: pd.DataFrame,
+    outliers_df: pd.DataFrame,
+    lower_bound: float,
+    upper_bound: float,
+) -> bytes:
+    """Create a row-level audit workbook for samples removed by the IQR rule."""
+
+    audit_export = outliers_df.copy()
+    audit_export.insert(
+        2,
+        "SAMPLE_MONTH",
+        audit_export[DATE_FIELD].dt.to_period("M").dt.to_timestamp(),
+    )
+    audit_export = audit_export.rename(
+        columns={
+            "SOURCE_EXCEL_ROW": "Source Excel row",
+            "OUTLIER_REASON": "Outlier reason",
+            "SAMPLE_MONTH": "Sample month",
+            "IQR_LOWER_BOUND_DAYS": "IQR lower bound (days)",
+            "IQR_UPPER_BOUND_DAYS": "IQR upper bound (days)",
+            "IQR_MULTIPLIER": "IQR multiplier",
+        }
+    )
+
+    overall_export = build_overall_summary(
+        reporting_df,
+        cleaned_df,
+        outliers_df,
+        lower_bound,
+        upper_bound,
+    )
+
+    audit_formats = {
+        "Source Excel row": "#,##0",
+        "Sample month": "mmmm yyyy",
+        "IQR lower bound (days)": "0.0",
+        "IQR upper bound (days)": "0.0",
+        "IQR multiplier": "0.0",
+        TURNAROUND_FIELD: "0.0",
+    }
+
+    for column in audit_export.columns:
+        if pd.api.types.is_datetime64_any_dtype(audit_export[column]):
+            audit_formats[column] = "yyyy-mm-dd"
+    audit_formats["Sample month"] = "mmmm yyyy"
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(
+        buffer,
+        engine="openpyxl",
+        datetime_format="yyyy-mm-dd",
+    ) as writer:
+        audit_export.to_excel(
+            writer,
+            sheet_name="Outliers",
+            index=False,
+        )
+        overall_export.to_excel(
+            writer,
+            sheet_name="Audit Summary",
+            index=False,
+        )
+
+        style_excel_sheet(
+            writer.sheets["Outliers"],
+            freeze_panes="G2",
+            number_formats=audit_formats,
+            tab_color="8C1D18",
+        )
+        style_overall_summary_sheet(writer.sheets["Audit Summary"])
+
+    return buffer.getvalue()
 
 
 # =============================================================================
@@ -713,9 +1218,9 @@ def render_html(fig: go.Figure) -> str:
 
 
 def main() -> None:
-    """Generate and upload the CWD turnaround-time chart."""
+    """Generate and upload the CWD turnaround-time reporting outputs."""
 
-    logger.info("Starting CWD turnaround-time chart generation.")
+    logger.info("Starting CWD turnaround-time reporting generation.")
     logger.info(
         "Reporting window: %s through %s",
         CHART_START_DATE.date(),
@@ -732,17 +1237,38 @@ def main() -> None:
     )
 
     turnaround_df = prepare_turnaround_data(df)
+    reporting_df = filter_reporting_window(turnaround_df)
 
-    cleaned_df, lower_bound, upper_bound = remove_outliers(turnaround_df)
+    (
+        cleaned_df,
+        outliers_df,
+        lower_bound,
+        upper_bound,
+    ) = remove_outliers(reporting_df)
     logger.info(
         "Using outlier bounds of %.1f to %.1f days",
         lower_bound,
         upper_bound,
     )
 
-    monthly_df = build_monthly_summary(cleaned_df)
+    monthly_df = build_monthly_summary(cleaned_df, outliers_df)
     fig = create_chart(monthly_df, cleaned_df)
     html = render_html(fig)
+    summary_workbook = create_summary_workbook(
+        monthly_df,
+        reporting_df,
+        cleaned_df,
+        outliers_df,
+        lower_bound,
+        upper_bound,
+    )
+    outlier_audit_workbook = create_outlier_audit_workbook(
+        reporting_df,
+        cleaned_df,
+        outliers_df,
+        lower_bound,
+        upper_bound,
+    )
 
     upload_html(
         s3_client,
@@ -750,9 +1276,21 @@ def main() -> None:
         S3_OUTPUT_BUCKET,
         S3_HTML_OUTPUT_KEY,
     )
+    upload_excel(
+        s3_client,
+        summary_workbook,
+        S3_OUTPUT_BUCKET,
+        S3_SUMMARY_EXCEL_OUTPUT_KEY,
+    )
+    upload_excel(
+        s3_client,
+        outlier_audit_workbook,
+        S3_OUTPUT_BUCKET,
+        S3_OUTLIER_AUDIT_OUTPUT_KEY,
+    )
 
     logger.info(
-        "Turnaround-time chart generation completed successfully."
+        "Turnaround-time reporting outputs completed successfully."
     )
 
 
@@ -762,3 +1300,4 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("CWD turnaround-time chart generation failed.")
         raise
+
