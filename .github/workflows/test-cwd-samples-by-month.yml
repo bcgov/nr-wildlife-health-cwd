@@ -2,6 +2,9 @@ name: Test CWD Samples by Month
 
 on:
   workflow_dispatch:
+  schedule:
+  - cron: '0 5 2 * *'
+    timezone: "America/Vancouver"
 
 jobs:
   cwd-samples-by-month:
