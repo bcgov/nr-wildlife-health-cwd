@@ -79,7 +79,7 @@ jobs:
           key: ${{ steps.pip-cache.outputs.cache-primary-key }}
 
       - name: Generate CWD turnaround-by-month outputs
-        run: python scripts/cwd_turnaround_by_month_v2.py
+        run: python scripts/cwd_turnaround_by_month.py
 
       - name: Verify S3 outputs
         run: |
