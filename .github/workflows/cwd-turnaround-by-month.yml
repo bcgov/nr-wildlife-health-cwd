@@ -29,11 +29,13 @@ jobs:
       SHEET_NAME: "0"
 
       # ---------------------------------------------------------------
-      # Output
-      # The existing public HTML files are currently in whcwdpbcbox.
+      # Outputs
+      # The public reporting files are currently in whcwdpbcbox.
       # ---------------------------------------------------------------
       S3_OUTPUT_BUCKET: "whcwdpbcbox"
       S3_HTML_OUTPUT_KEY: "cwd_turnaround_by_month.html"
+      S3_SUMMARY_EXCEL_OUTPUT_KEY: "cwd_turnaround_by_month_summary.xlsx"
+      S3_OUTLIER_AUDIT_OUTPUT_KEY: "cwd_turnaround_by_month_outliers.xlsx"
 
       # ---------------------------------------------------------------
       # Chart configuration
@@ -76,10 +78,10 @@ jobs:
           path: ~/.cache/pip
           key: ${{ steps.pip-cache.outputs.cache-primary-key }}
 
-      - name: Generate CWD turnaround-by-month output
+      - name: Generate CWD turnaround-by-month outputs
         run: python scripts/cwd_turnaround_by_month.py
 
-      - name: Verify S3 output
+      - name: Verify S3 outputs
         run: |
           python - <<'PY'
           import os
@@ -101,15 +103,22 @@ jobs:
           )
 
           bucket = os.environ["S3_OUTPUT_BUCKET"]
-          key = os.environ["S3_HTML_OUTPUT_KEY"]
 
-          response = s3.head_object(Bucket=bucket, Key=key)
-          size = response["ContentLength"]
+          for env_name in (
+              "S3_HTML_OUTPUT_KEY",
+              "S3_SUMMARY_EXCEL_OUTPUT_KEY",
+              "S3_OUTLIER_AUDIT_OUTPUT_KEY",
+          ):
+              key = os.environ[env_name]
+              response = s3.head_object(Bucket=bucket, Key=key)
+              size = response["ContentLength"]
 
-          if size <= 0:
-              raise RuntimeError(f"Output object is empty: s3://{bucket}/{key}")
+              if size <= 0:
+                  raise RuntimeError(
+                      f"Output object is empty: s3://{bucket}/{key}"
+                  )
 
-          print(f"Found s3://{bucket}/{key} ({size:,} bytes)")
+              print(f"Found s3://{bucket}/{key} ({size:,} bytes)")
           PY
 
       - name: Verify repository remained clean
@@ -121,3 +130,4 @@ jobs:
           fi
 
           echo "Repository is clean."
+
