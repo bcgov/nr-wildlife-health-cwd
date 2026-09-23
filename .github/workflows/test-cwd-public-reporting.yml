@@ -2,7 +2,9 @@ name: Test CWD Public Reporting Pipeline
 
 on:
   workflow_dispatch:
-
+  schedule:
+    - cron: '0 10 * * *'
+      timezone: "America/Vancouver"
 jobs:
   cwd-public-reporting:
     runs-on: ubuntu-latest
