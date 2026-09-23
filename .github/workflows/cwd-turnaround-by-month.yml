@@ -2,6 +2,10 @@ name: Generate CWD Turnaround by Month
 
 on:
   workflow_dispatch:
+  
+  schedule:
+    - cron: '0 4 2 * *'
+      timezone: "America/Vancouver"
 
 jobs:
   cwd-turnaround-by-month:
