@@ -8,7 +8,7 @@ on:
 
 jobs:
   cwd-samples-by-month:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
       PYTHONDONTWRITEBYTECODE: "1"
