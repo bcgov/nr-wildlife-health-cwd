@@ -7,7 +7,7 @@ on:
       timezone: "America/Vancouver"
 jobs:
   cwd-public-reporting:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # =================================================================
     # Pipeline configuration
