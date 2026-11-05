@@ -978,24 +978,131 @@ def hunter_qa_and_updates_to_master(df, surveys_df):
 
     # re-combine dataframes
     df_wh_temp = pd.concat([hunter_matches_df, xls_df], ignore_index=True)
-
-    # Use df_email_submissions Latitude and Longitude fields to update UPDATED_LATITUDE, UPDATED_LONGITUDE where there is a matching Ear Card ID
-    # Calculate  UPDATED_SPATIAL_CAPTURE_DESCRIPTOR to 'Email Submission'
+    #-------------------------------------------------------------------------------------------------------------------------------------------
+    # ============================================================
+    # Incorporate Email Submission Coordinates into Master Dataset
+    # ============================================================
+    
     logging.info("..adding email submission lat/long to master sampling dataset")
+    
+    # Record initial counts
+    master_count_before = len(df_wh_temp)
+    email_count = len(df_email_submissions)
+    
+    logging.info(f"   Master records before merge: {master_count_before:,}")
+    logging.info(f"   Email submission records: {email_count:,}")
+    
+    # Convert email Ear Card IDs to strings (existing behaviour)
     df_email_submissions['Ear Card'] = df_email_submissions['Ear Card'].astype(str)
-    df_wh = pd.merge(left=df_wh_temp,
-                    right=df_email_submissions[['Ear Card', 'Latitude', 'Longitude']],
-                    how='left',                
-                    left_on='CWD_EAR_CARD_ID',
-                    right_on='Ear Card')
-
-    # Replaces any existing values 
-    mask = df_wh['Latitude'].notna() & df_wh['Longitude'].notna()
-
-    df_wh['UPDATED_LATITUDE']  = df_wh['UPDATED_LATITUDE'].where(~mask, df_wh['Latitude'])
-    df_wh['UPDATED_LONGITUDE'] = df_wh['UPDATED_LONGITUDE'].where(~mask, df_wh['Longitude'])
-    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'].where(~mask, 'Email Submission')
-
+    
+    # Check coordinate completeness
+    valid_coords = (
+        df_email_submissions['Latitude'].notna() &
+        df_email_submissions['Longitude'].notna()
+    )
+    
+    logging.info(
+        f"   Email submissions with complete lat/long: {valid_coords.sum():,}"
+    )
+    logging.info(
+        f"   Email submissions with incomplete lat/long: {(~valid_coords).sum():,}"
+    )
+    
+    # Check duplicate Ear Card IDs in email submissions
+    duplicate_count = df_email_submissions['Ear Card'].duplicated().sum()
+    
+    logging.info(
+        f"   Duplicate Ear Card IDs in email submissions: {duplicate_count:,}"
+    )
+    
+    if duplicate_count > 0:
+        logging.warning(
+            "   WARNING: Duplicate Ear Card IDs may cause additional "
+            "records to be created during the merge."
+        )
+    
+    # Check matching Ear Card IDs before merging
+    matching_ids = df_email_submissions['Ear Card'].isin(
+        df_wh_temp['CWD_EAR_CARD_ID']
+    )
+    
+    logging.info(
+        f"   Email submissions matching master Ear Card IDs: "
+        f"{matching_ids.sum():,}"
+    )
+    
+    logging.info(
+        f"   Email submissions NOT matching master Ear Card IDs: "
+        f"{(~matching_ids).sum():,}"
+    )
+    
+    # Show examples of unmatched identifiers
+    unmatched_ids = df_email_submissions.loc[
+        ~matching_ids, 'Ear Card'
+    ].head(10).tolist()
+    
+    if unmatched_ids:
+        logging.warning(
+            f"   Example unmatched Email Ear Card IDs: {unmatched_ids}"
+        )
+    
+    # Perform original merge
+    df_wh = pd.merge(
+        left=df_wh_temp,
+        right=df_email_submissions[['Ear Card', 'Latitude', 'Longitude']],
+        how='left',
+        left_on='CWD_EAR_CARD_ID',
+        right_on='Ear Card'
+    )
+    
+    # Check whether merge increased record count
+    master_count_after = len(df_wh)
+    additional_records = master_count_after - master_count_before
+    
+    logging.info(f"   Master records after merge: {master_count_after:,}")
+    
+    if additional_records > 0:
+        logging.warning(
+            f"   WARNING: Merge created {additional_records:,} additional "
+            "records. Check for duplicate Ear Card IDs."
+        )
+    
+    # Identify rows with both coordinates populated
+    mask = (
+        df_wh['Latitude'].notna() &
+        df_wh['Longitude'].notna()
+    )
+    
+    logging.info(
+        f"   Master records eligible for coordinate updates: {mask.sum():,}"
+    )
+    
+    # Apply original coordinate update logic
+    df_wh['UPDATED_LATITUDE'] = df_wh['UPDATED_LATITUDE'].where(
+        ~mask, df_wh['Latitude']
+    )
+    
+    df_wh['UPDATED_LONGITUDE'] = df_wh['UPDATED_LONGITUDE'].where(
+        ~mask, df_wh['Longitude']
+    )
+    
+    df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] = (
+        df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'].where(
+            ~mask, 'Email Submission'
+        )
+    )
+    
+    # Verify successful assignment
+    updated_count = (
+        df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Email Submission'
+    ).sum()
+    
+    logging.info(
+        f"   Master records marked as Email Submission: {updated_count:,}"
+    )
+    
+    logging.info("..Email submission coordinate processing complete")
+    #--------------------------------------------------------------------------------------------------------------------------------------------
     # Drop unneeded columns
     df_wh = df_wh.drop(columns=['Ear Card', 'Latitude', 'Longitude'])
     
