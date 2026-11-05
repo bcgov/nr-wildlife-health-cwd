@@ -3014,6 +3014,59 @@ if __name__ == "__main__":
     # Add remaining calculated fields and re-order all fields according to the Data Dictionary
     df_wh = master_dataframe_edits(df_wh, fprop_dict, domains_dict)
 
+    # ============================================================
+    # FINAL QA - VERIFY EMAIL COORDINATES BEFORE SAVING
+    # ============================================================
+    
+    logging.info("\n========== FINAL MASTER DATASET QA ==========")
+    
+    logging.info(f"Total master records: {len(df_wh):,}")
+    
+    # Count each spatial capture category
+    logging.info("\nSpatial Capture Descriptor counts:")
+    
+    logging.info(
+        "\n" +
+        df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR']
+        .value_counts(dropna=False)
+        .to_string()
+    )
+    
+    # Check email submission records
+    email_records = df_wh[
+        df_wh['UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'] == 'Email Submission'
+    ]
+    
+    logging.info(
+        f"\nEmail Submission records before Excel export: "
+        f"{len(email_records):,}"
+    )
+    
+    if len(email_records) > 0:
+    
+        logging.info("\nExample Email Submission records:")
+    
+        logging.info(
+            "\n" +
+            email_records[
+                [
+                    'CWD_EAR_CARD_ID',
+                    'UPDATED_LATITUDE',
+                    'UPDATED_LONGITUDE',
+                    'UPDATED_SPATIAL_CAPTURE_DESCRIPTOR'
+                ]
+            ].head(10).to_string(index=False)
+        )
+    
+    else:
+        logging.error(
+            "CRITICAL: Email Submission records have disappeared "
+            "before saving the master spreadsheet!"
+        )
+    
+    logging.info("\n=============================================")
+
+    
     logging.info('\nSaving the Master Dataset xlsx to Object Storage')
     #bucket_name=s3_bucket_name   # this points to GeoDrive
     backup_master_dataset(s3_client, s3_bucket_name) #backup  
